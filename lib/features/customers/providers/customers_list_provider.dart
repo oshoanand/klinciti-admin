@@ -1,85 +1,100 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/network/api_client.dart';
+import '../../../core/network/api_exceptions.dart';
 import '../data/customer_model.dart';
 
-final customersListProvider =
-    AsyncNotifierProvider.autoDispose<
-      CustomersListNotifier,
-      List<CustomerModel>
-    >(() {
-      return CustomersListNotifier();
-    });
+typedef JsonMap = Map<String, dynamic>;
+typedef CustomerList = List<CustomerModel>;
 
-class CustomersListNotifier
-    extends AutoDisposeAsyncNotifier<List<CustomerModel>> {
+final customersListProvider =
+    AsyncNotifierProvider.autoDispose<CustomersListNotifier, CustomerList>(
+      CustomersListNotifier.new,
+    );
+
+class CustomersListNotifier extends AutoDisposeAsyncNotifier<CustomerList> {
   int _page = 1;
   final int _limit = 20;
   bool _hasMore = true;
   bool _isFetchingMore = false;
 
+  bool get hasMore => _hasMore;
+  bool get isFetchingMore => _isFetchingMore;
+
   @override
-  Future<List<CustomerModel>> build() async {
+  Future<CustomerList> build() async {
     _page = 1;
     _hasMore = true;
+    _isFetchingMore = false;
     return _fetchPage(1);
   }
 
-  Future<List<CustomerModel>> _fetchPage(int pageIndex) async {
-    final api = ref.read(apiClientProvider);
-    final response = await api.dio.get(
-      '/customers/admin/list',
-      queryParameters: {'page': pageIndex, 'limit': _limit},
-    );
+  Future<CustomerList> _fetchPage(int pageIndex) async {
+    try {
+      final api = ref.read(apiClientProvider);
+      final response = await api.dio.get(
+        '/customers/admin/list',
+        queryParameters: {'page': pageIndex, 'limit': _limit},
+      );
 
-    final List data = response.data['data'] ?? [];
-    final meta = response.data['meta'] ?? {};
-    final total = meta['total'] ?? 0;
+      final raw = response.data;
+      final List<dynamic> data = (raw is Map && raw['data'] is List)
+          ? raw['data'] as List<dynamic>
+          : (raw is List ? raw : const []);
 
-    final list = data
-        .map((json) => CustomerModel.fromJson(json as Map<String, dynamic>))
-        .toList();
+      final JsonMap meta = (raw is Map && raw['meta'] is Map)
+          ? JsonMap.from(raw['meta'] as Map)
+          : JsonMap();
+      final int total = int.tryParse((meta['total'] ?? 0).toString()) ?? 0;
 
-    // ✅ FIX: Added multiplication operator
-    if (pageIndex * _limit >= total) {
-      _hasMore = false;
+      final CustomerList list = data
+          .whereType()
+          .map((json) => CustomerModel.fromJson(JsonMap.from(json)))
+          .toList();
+
+      if (pageIndex * _limit >= total || list.length < _limit) {
+        _hasMore = false;
+      }
+
+      return list;
+    } catch (e) {
+      throw ApiException.fromDioException(e);
     }
-
-    return list;
   }
 
   Future<void> loadMore() async {
-    if (_isFetchingMore || !_hasMore || state.hasError || state.value == null)
+    final currentList = state.valueOrNull;
+    if (_isFetchingMore || !_hasMore || state.hasError || currentList == null) {
       return;
+    }
 
     _isFetchingMore = true;
-    _page++;
+    final int nextPage = _page + 1;
 
     try {
-      final newItems = await _fetchPage(_page);
-      state = AsyncData([...state.value!, ...newItems]);
-    } catch (error, stackTrace) {
-      _page--;
+      final newItems = await _fetchPage(nextPage);
+      _page = nextPage;
+      state = AsyncData([...currentList, ...newItems]);
+    } catch (_) {
+      // Keep current `_page` so user can retry on next scroll
     } finally {
       _isFetchingMore = false;
     }
   }
 
-  // ✅ NEW METHOD: Updates a single customer when the Socket event fires
+  /// Instantly updates a customer's online status when a Socket event fires
   void updateCustomerStatus(String id, bool isOnline, DateTime? lastSeen) {
-    if (state.value == null) return;
+    final currentList = state.valueOrNull;
+    if (currentList == null) return;
 
-    final currentList = state.value!;
     final index = currentList.indexWhere((c) => c.id == id);
-
     if (index != -1) {
       final updatedCustomer = currentList[index].copyWith(
         isOnline: isOnline,
         lastSeen: lastSeen,
       );
 
-      // Create a new list to trigger UI rebuild
-      final newList = List<CustomerModel>.from(currentList);
+      final newList = CustomerList.from(currentList);
       newList[index] = updatedCustomer;
       state = AsyncData(newList);
     }

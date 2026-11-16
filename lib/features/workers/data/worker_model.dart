@@ -1,93 +1,236 @@
+typedef JsonMap = Map<String, dynamic>;
+
+class WorkerCategoryItem {
+  final String id;
+  final String name;
+  final String? slug;
+  final String? icon;
+  final String? image;
+  final String? parentId;
+
+  const WorkerCategoryItem({
+    required this.id,
+    required this.name,
+    this.slug,
+    this.icon,
+    this.image,
+    this.parentId,
+  });
+
+  factory WorkerCategoryItem.fromJson(JsonMap json) {
+    return WorkerCategoryItem(
+      id: json['id']?.toString() ?? '',
+      name: json['name']?.toString() ?? '',
+      slug: json['slug']?.toString(),
+      icon: json['icon']?.toString(),
+      image: json['image']?.toString(),
+      parentId: (json['parent_id'] ?? json['parentId'])?.toString(),
+    );
+  }
+}
+
 class WorkerModel {
   final String id;
   final String name;
+  final String? firstName;
+  final String? middleName;
+  final String? lastName;
+  final String? email;
   final String? mobile;
-  final String authStatus; // 'PENDING', 'ACTIVE', 'BLOCKED', 'DELETED'
-  final String
-  moderationStatus; // 'INCOMPLETE', 'PENDING', 'APPROVED', 'REJECTED'
+  final String? avatarUrl;
+  final String authStatus;
+  final String moderationStatus;
+  final String? rejectionReason;
 
-  // Profile specific fields
+  // Step 2: Location, Experience, Bio & Vehicle
+  final String? city;
+  final String? address;
+  final String? experience;
+  final String? description;
   final bool hasVehicle;
   final String? vehicleModel;
-  final String? vehicleNumber; // Added to match UI usage
-  final List<String> experience;
-  final String? categoryName;
+  final String? vehicleNumber;
+  final List<WorkerCategoryItem> categories;
 
-  // KYC & Documents
+  // Step 3: KYC & Identity
+  final DateTime? dateOfBirth;
+  final String? gender;
+  final String? passportNumber;
   final String? idDocumentFrontUrl;
-  final String? idDocumentBackUrl; // ✅ ADDED
+  final String? idDocumentBackUrl;
   final String? selfieWithIdUrl;
-  final String? driversLicenseUrl; // ✅ ADDED
+  final String? driversLicenseUrl;
 
+  // Step 4: Financial Info
+  final String? taxId;
+  final String? payoutDetails;
+
+  // Stats & Timestamps
   final double rating;
-
-  // Aggregated stats
   final int totalJobsCompleted;
   final double totalIncome;
-  final String? rejectionReason;
-  final String? avatarUrl;
+  final DateTime? createdAt;
 
-  bool get isApproved =>
-      moderationStatus == 'APPROVED' && authStatus == 'ACTIVE';
-
-  WorkerModel({
+  const WorkerModel({
     required this.id,
     required this.name,
+    this.firstName,
+    this.middleName,
+    this.lastName,
+    this.email,
     this.mobile,
+    this.avatarUrl,
     required this.authStatus,
     required this.moderationStatus,
-    required this.hasVehicle,
+    this.rejectionReason,
+    this.city,
+    this.address,
+    this.experience,
+    this.description,
+    this.hasVehicle = false,
     this.vehicleModel,
     this.vehicleNumber,
-    this.experience = const [],
-    this.categoryName,
+    this.categories = const [],
+    this.dateOfBirth,
+    this.gender,
+    this.passportNumber,
     this.idDocumentFrontUrl,
-    this.idDocumentBackUrl, // ✅ ADDED
+    this.idDocumentBackUrl,
     this.selfieWithIdUrl,
-    this.driversLicenseUrl, // ✅ ADDED
+    this.driversLicenseUrl,
+    this.taxId,
+    this.payoutDetails,
     this.rating = 5.0,
     this.totalJobsCompleted = 0,
     this.totalIncome = 0.0,
-    this.rejectionReason,
-    this.avatarUrl,
+    this.createdAt,
   });
 
-  factory WorkerModel.fromJson(Map<String, dynamic> json) {
+  /// Returns full Russian FIO (Фамилия Имя Отчество) if available, otherwise `name`
+  String get fullName {
+    final parts = [lastName, firstName, middleName]
+        .where((p) => p != null && p.trim().isNotEmpty)
+        .map((p) => p!.trim())
+        .toList();
+    if (parts.isNotEmpty) {
+      return parts.join(' ');
+    }
+    return name;
+  }
+
+  factory WorkerModel.fromJson(JsonMap rawJson) {
+    // Unwrap `{ data: { ... } }` if passed directly from response.data
+    final JsonMap json = (rawJson['data'] is Map)
+        ? JsonMap.from(rawJson['data'] as Map)
+        : rawJson;
+
+    // Parse experience whether String, num, or legacy List
+    String? parsedExperience;
+    final rawExp = json['experience'];
+    if (rawExp is List) {
+      parsedExperience = rawExp
+          .map((e) => e.toString().trim())
+          .where((s) => s.isNotEmpty)
+          .join(', ');
+    } else if (rawExp != null && rawExp.toString().trim().isNotEmpty) {
+      parsedExperience = rawExp.toString().trim();
+    }
+
+    // Parse categories list
+    final rawCats = json['categories'];
+    final List<WorkerCategoryItem> parsedCategories = rawCats is List
+        ? rawCats
+              .whereType()
+              .map((c) => WorkerCategoryItem.fromJson(JsonMap.from(c)))
+              .toList()
+        : const [];
+
+    final firstName = (json['first_name'] ?? json['firstName'])
+        ?.toString()
+        .trim();
+    final middleName = (json['middle_name'] ?? json['middleName'])
+        ?.toString()
+        .trim();
+    final lastName = (json['last_name'] ?? json['lastName'])?.toString().trim();
+
+    final fallbackName = [
+      firstName,
+      lastName,
+    ].where((e) => e != null && e.isNotEmpty).join(' ').trim();
+
+    final rawName = json['name']?.toString().trim() ?? '';
+
     return WorkerModel(
-      id: json['id']?.toString() ?? '',
-      name: json['name'] ?? 'Без имени',
+      id: (json['id'] ?? json['user_id'] ?? '').toString(),
+      name: rawName.isNotEmpty
+          ? rawName
+          : (fallbackName.isNotEmpty ? fallbackName : 'Без имени'),
+      firstName: firstName,
+      middleName: middleName,
+      lastName: lastName,
+      email: json['email']?.toString(),
       mobile: json['mobile']?.toString(),
-      authStatus: json['auth_status'] ?? 'PENDING',
-      moderationStatus: json['moderation_status'] ?? 'INCOMPLETE',
-      hasVehicle: json['has_vehicle'] == true || json['has_vehicle'] == 1,
-      vehicleModel: json['vehicle_model']?.toString(),
-      vehicleNumber: json['vehicle_number']?.toString(),
-      experience: json['experience'] != null
-          ? List<String>.from(json['experience'])
-          : [],
-      categoryName: json['category_name']?.toString(),
+      avatarUrl: (json['image'] ?? json['avatarUrl'] ?? json['avatar_url'])
+          ?.toString(),
+      authStatus: (json['auth_status'] ?? json['authStatus'] ?? 'ACTIVE')
+          .toString(),
+      moderationStatus:
+          (json['moderation_status'] ?? json['moderationStatus'] ?? 'PENDING')
+              .toString(),
+      rejectionReason: (json['rejection_reason'] ?? json['rejectionReason'])
+          ?.toString(),
 
-      // ✅ KYC Documents
-      idDocumentFrontUrl: json['id_document_front_url']?.toString(),
-      idDocumentBackUrl: json['id_document_back_url']?.toString(), // ✅ ADDED
-      selfieWithIdUrl: json['selfie_with_id_url']?.toString(),
-      driversLicenseUrl: json['drivers_license_url']?.toString(), // ✅ ADDED
+      city: json['city']?.toString(),
+      address: json['address']?.toString(),
+      experience: parsedExperience,
+      description: json['description']?.toString(),
+      hasVehicle: json['has_vehicle'] == true || json['hasVehicle'] == true,
+      vehicleModel: (json['vehicle_model'] ?? json['vehicleModel'])?.toString(),
+      vehicleNumber: (json['vehicle_number'] ?? json['vehicleNumber'])
+          ?.toString(),
+      categories: parsedCategories,
 
-      rating: json['rating'] != null
-          ? double.tryParse(json['rating'].toString()) ?? 5.0
-          : 5.0,
+      dateOfBirth: (json['date_of_birth'] ?? json['dateOfBirth']) != null
+          ? DateTime.tryParse(
+              (json['date_of_birth'] ?? json['dateOfBirth']).toString(),
+            )
+          : null,
+      gender: json['gender']?.toString(),
+      passportNumber: (json['passport_number'] ?? json['passportNumber'])
+          ?.toString(),
+      idDocumentFrontUrl:
+          (json['id_document_front_url'] ?? json['idDocumentFrontUrl'])
+              ?.toString(),
+      idDocumentBackUrl:
+          (json['id_document_back_url'] ?? json['idDocumentBackUrl'])
+              ?.toString(),
+      selfieWithIdUrl: (json['selfie_with_id_url'] ?? json['selfieWithIdUrl'])
+          ?.toString(),
+      driversLicenseUrl:
+          (json['drivers_license_url'] ?? json['driversLicenseUrl'])
+              ?.toString(),
 
-      // Safely parse aggregated stats
-      totalJobsCompleted: json['totalJobsCompleted'] != null
-          ? int.tryParse(json['totalJobsCompleted'].toString()) ?? 0
-          : 0,
+      taxId: (json['tax_id'] ?? json['taxId'])?.toString(),
+      payoutDetails: (json['payout_details'] ?? json['payoutDetails'])
+          ?.toString(),
 
-      totalIncome: json['totalIncome'] != null
-          ? double.tryParse(json['totalIncome'].toString()) ?? 0.0
-          : 0.0,
-
-      rejectionReason: json['rejection_reason']?.toString(),
-      avatarUrl: json['image']?.toString(),
+      rating: double.tryParse((json['rating'] ?? '5.0').toString()) ?? 5.0,
+      totalJobsCompleted:
+          int.tryParse(
+            (json['totalJobsCompleted'] ?? json['total_jobs_completed'] ?? '0')
+                .toString(),
+          ) ??
+          0,
+      totalIncome:
+          double.tryParse(
+            (json['totalIncome'] ?? json['total_income'] ?? '0').toString(),
+          ) ??
+          0.0,
+      createdAt: (json['created_at'] ?? json['createdAt']) != null
+          ? DateTime.tryParse(
+              (json['created_at'] ?? json['createdAt']).toString(),
+            )
+          : null,
     );
   }
 }

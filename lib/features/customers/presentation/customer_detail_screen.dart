@@ -1,16 +1,18 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/network/api_exceptions.dart';
 import '../../../core/network/api_client.dart';
-import '../../../shared/widgets/global_error_widget.dart';
+import '../../../core/network/api_exceptions.dart';
+import '../../../core/router/route_names.dart';
 import '../../../core/socket/socket_service.dart';
+import '../../../shared/widgets/global_error_widget.dart';
+import '../../chat/data/chat_repository.dart';
 import '../providers/customer_detail_provider.dart';
 import '../providers/customers_list_provider.dart';
-import '../../chat/data/chat_repository.dart';
 
 class _StartChatButton extends ConsumerStatefulWidget {
   final String customerId;
@@ -33,14 +35,16 @@ class _StartChatButtonState extends ConsumerState<_StartChatButton> {
 
       if (mounted) {
         setState(() => _isLoading = false);
-        context.push('/chat/${session.id}/${widget.customerId}');
+        context.push(
+          '${AppRoutes.chatDetail}/${session.id}/${widget.customerId}',
+        );
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
         final errorMessage = e is ApiException
             ? e.message
-            : 'Ошибка создания чата';
+            : ApiException.fromDioException(e).message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(errorMessage),
@@ -66,13 +70,13 @@ class _StartChatButtonState extends ConsumerState<_StartChatButton> {
             )
           : const Icon(LucideIcons.message_circle),
       label: Text(
-        _isLoading ? 'Загрузка...' : 'Написать',
+        _isLoading ? 'Загрузка...' : 'Написать клиенту',
         style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
       ),
       style: ElevatedButton.styleFrom(
         backgroundColor: const Color(0xFF3B82F6),
         foregroundColor: Colors.white,
-        disabledBackgroundColor: const Color(0xFF3B82F6).withOpacity(0.6),
+        disabledBackgroundColor: const Color(0xFF3B82F6).withValues(alpha: 0.6),
         disabledForegroundColor: Colors.white,
         padding: const EdgeInsets.symmetric(vertical: 16),
         elevation: 0,
@@ -93,36 +97,34 @@ class CustomerDetailScreen extends ConsumerStatefulWidget {
 
 class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
   bool _isUpdating = false;
+  late final SocketService _socketService;
 
   @override
   void initState() {
     super.initState();
-    // ✅ Start listening to Socket real-time events
-    ref
-        .read(socketServiceProvider)
-        .listen('user_status_changed', _onUserStatusChanged);
+    // Cache SocketService instance so dispose() never calls ref.read()
+    _socketService = ref.read(socketServiceProvider);
+    _socketService.listen('user_status_changed', _onUserStatusChanged);
   }
 
   void _onUserStatusChanged(dynamic data) {
-    if (!mounted) return;
+    if (!mounted || data is! Map) return;
     try {
-      final eventUserId = data['userId'] as String;
+      final eventUserId = data['userId']?.toString();
 
-      // Only update if the event is for the customer we are currently viewing
       if (eventUserId == widget.customerId) {
-        final isOnline = data['isOnline'] as bool;
-        final lastSeenStr = data['lastSeen'] as String?;
+        final isOnline = data['isOnline'] == true;
+        final lastSeenStr = data['lastSeen']?.toString();
         final lastSeen = lastSeenStr != null
-            ? DateTime.parse(lastSeenStr)
+            ? DateTime.tryParse(lastSeenStr)
             : null;
 
-        // Update both the Detail screen and the main List provider instantly
         ref
             .read(customerDetailProvider(widget.customerId).notifier)
             .updatePresence(isOnline, lastSeen);
         ref
             .read(customersListProvider.notifier)
-            .updateCustomerStatus(eventUserId, isOnline, lastSeen);
+            .updateCustomerStatus(eventUserId!, isOnline, lastSeen);
       }
     } catch (e) {
       debugPrint('Error parsing user_status_changed on detail screen: $e');
@@ -131,14 +133,39 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
 
   @override
   void dispose() {
-    // ✅ Remove the listener when we pop back
-    ref
-        .read(socketServiceProvider)
-        .stopListening('user_status_changed', _onUserStatusChanged);
+    _socketService.stopListening('user_status_changed', _onUserStatusChanged);
     super.dispose();
   }
 
-  // ✅ Helper for Localized Timestamp
+  Future<void> _makeCall(String? mobile) async {
+    if (mobile == null || mobile.trim().isEmpty) return;
+
+    final cleanNumber = mobile.replaceAll(RegExp(r'[^\d+]'), '');
+    final Uri launchUri = Uri(scheme: 'tel', path: cleanNumber);
+
+    try {
+      await launchUrl(launchUri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Невозможно открыть набор номера на этом устройстве'),
+          ),
+        );
+      }
+    }
+  }
+
+  void _copyToClipboard(String text, String label) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$label скопирован в буфер обмена'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   String _formatLastSeen(DateTime date) {
     final localDate = date.toLocal();
     final now = DateTime.now();
@@ -155,6 +182,37 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
     final dateString =
         '${localDate.day.toString().padLeft(2, '0')}.${localDate.month.toString().padLeft(2, '0')}.${localDate.year}';
     return 'Был(а) $dateString в $timeString';
+  }
+
+  Future<void> _confirmAndToggleStatus(bool isCurrentlyActive) async {
+    if (isCurrentlyActive) {
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Заблокировать клиента?'),
+          content: const Text(
+            'Заблокированный клиент не сможет создавать новые заказы и входить в приложение. Вы сможете разблокировать его в любой момент.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text(
+                'Заблокировать',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    await _toggleUserStatus(isCurrentlyActive);
   }
 
   Future<void> _toggleUserStatus(bool currentStatus) async {
@@ -184,7 +242,7 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
       if (mounted) {
         final message = e is ApiException
             ? e.message
-            : 'Ошибка при обновлении статуса';
+            : ApiException.fromDioException(e).message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(message), backgroundColor: Colors.red),
         );
@@ -202,6 +260,7 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(LucideIcons.arrow_left, color: Color(0xFF0F172A)),
@@ -214,6 +273,18 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              LucideIcons.refresh_cw,
+              size: 18,
+              color: Color(0xFF0F172A),
+            ),
+            tooltip: 'Обновить',
+            onPressed: () =>
+                ref.invalidate(customerDetailProvider(widget.customerId)),
+          ),
+        ],
       ),
       body: detailAsync.when(
         loading: () => const Center(
@@ -226,6 +297,8 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
         ),
         data: (customer) {
           final isOnline = customer.isOnline;
+          final hasImage =
+              customer.image != null && customer.image!.trim().isNotEmpty;
 
           return RefreshIndicator(
             color: const Color(0xFF0F172A),
@@ -237,19 +310,19 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
 
-                  // ✅ Avatar with Presence Dot Overlay
+                  // Avatar with Presence Dot Overlay
                   Stack(
                     children: [
                       CircleAvatar(
                         radius: 50,
                         backgroundColor: const Color(0xFF0F172A)
-                            .withOpacity(0.05),
-                        backgroundImage: customer.image != null
+                            .withValues(alpha: 0.05),
+                        backgroundImage: hasImage
                             ? NetworkImage(customer.image!)
                             : null,
-                        child: customer.image == null
+                        child: !hasImage
                             ? const Icon(
                                 LucideIcons.user,
                                 size: 40,
@@ -277,14 +350,16 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                   const SizedBox(height: 16),
                   Text(
                     customer.name,
+                    textAlign: TextAlign.center,
                     style: const TextStyle(
-                      fontSize: 24,
+                      fontSize: 22,
                       fontWeight: FontWeight.bold,
+                      color: Color(0xFF0F172A),
                     ),
                   ),
                   const SizedBox(height: 4),
 
-                  // ✅ Real-time Presence Text
+                  // Real-time Presence Text
                   if (isOnline)
                     const Text(
                       'В сети',
@@ -307,6 +382,7 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
 
                   const SizedBox(height: 24),
 
+                  // Contact & Account Card
                   Container(
                     decoration: BoxDecoration(
                       color: Colors.white,
@@ -324,18 +400,35 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                             ),
                             title: const Text('Телефон'),
                             subtitle: Text(customer.mobile!),
-                            trailing: IconButton(
-                              icon: const Icon(
-                                LucideIcons.phone_call,
-                                color: Colors.green,
-                              ),
-                              onPressed: () => launchUrl(
-                                Uri.parse('tel:${customer.mobile}'),
-                              ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                    LucideIcons.copy,
+                                    size: 18,
+                                    color: Colors.blueGrey,
+                                  ),
+                                  tooltip: 'Скопировать телефон',
+                                  onPressed: () => _copyToClipboard(
+                                    customer.mobile!,
+                                    'Телефон',
+                                  ),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    LucideIcons.phone_call,
+                                    color: Colors.green,
+                                  ),
+                                  tooltip: 'Позвонить',
+                                  onPressed: () => _makeCall(customer.mobile),
+                                ),
+                              ],
                             ),
                           ),
                         if (customer.email != null &&
-                            customer.email!.isNotEmpty)
+                            customer.email!.isNotEmpty) ...[
+                          const Divider(height: 1),
                           ListTile(
                             leading: const Icon(
                               LucideIcons.mail,
@@ -343,8 +436,23 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                             ),
                             title: const Text('Email'),
                             subtitle: Text(customer.email!),
+                            trailing: IconButton(
+                              icon: const Icon(
+                                LucideIcons.copy,
+                                size: 18,
+                                color: Colors.blueGrey,
+                              ),
+                              tooltip: 'Скопировать Email',
+                              onPressed: () =>
+                                  _copyToClipboard(customer.email!, 'Email'),
+                            ),
                           ),
-                        if (customer.city != null || customer.address != null)
+                        ],
+                        if ((customer.city != null &&
+                                customer.city!.trim().isNotEmpty) ||
+                            (customer.address != null &&
+                                customer.address!.trim().isNotEmpty)) ...[
+                          const Divider(height: 1),
                           ListTile(
                             leading: const Icon(
                               LucideIcons.map_pin,
@@ -352,12 +460,14 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                             ),
                             title: const Text('Адрес'),
                             subtitle: Text(
-                              [
-                                customer.city,
-                                customer.address,
-                              ].where((e) => e != null).join(', '),
+                              [customer.city, customer.address]
+                                  .where(
+                                    (e) => e != null && e.trim().isNotEmpty,
+                                  )
+                                  .join(', '),
                             ),
                           ),
+                        ],
                         const Divider(height: 1),
                         ListTile(
                           leading: Icon(
@@ -372,6 +482,7 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                           subtitle: Text(
                             customer.isActive ? 'Активен' : 'Заблокирован',
                             style: TextStyle(
+                              fontWeight: FontWeight.w600,
                               color: customer.isActive
                                   ? Colors.green
                                   : Colors.red,
@@ -387,9 +498,11 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                                 )
                               : Switch(
                                   value: customer.isActive,
-                                  activeColor: Colors.green,
-                                  onChanged: (val) =>
-                                      _toggleUserStatus(customer.isActive),
+                                  activeThumbColor: Colors.white,
+                                  activeTrackColor: Colors.green,
+                                  onChanged: (_) => _confirmAndToggleStatus(
+                                    customer.isActive,
+                                  ),
                                 ),
                         ),
                       ],
@@ -398,9 +511,36 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
 
                   const SizedBox(height: 24),
 
+                  // Action Buttons Row
                   Row(
                     children: [
+                      if (customer.mobile != null &&
+                          customer.mobile!.trim().isNotEmpty) ...[
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () => _makeCall(customer.mobile),
+                            icon: const Icon(LucideIcons.phone, size: 18),
+                            label: const Text(
+                              'Позвонить',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.green.shade700,
+                              side: BorderSide(color: Colors.green.shade400),
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                      ],
                       Expanded(
+                        flex: 2,
                         child: _StartChatButton(customerId: customer.id),
                       ),
                     ],

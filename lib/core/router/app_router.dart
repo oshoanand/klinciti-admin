@@ -22,8 +22,6 @@ import '../../features/jobs/presentation/job_detail_screen.dart';
 // --- Customers & Workers ---
 import '../../features/customers/presentation/customer_list_screen.dart';
 import '../../features/customers/presentation/customer_detail_screen.dart';
-
-// ✅ Make sure this imports the Dashboard, NOT the list, for the bottom nav tab
 import '../../features/workers/presentation/workers_dashboard_screen.dart';
 import '../../features/workers/presentation/workers_list_screen.dart';
 import '../../features/workers/presentation/worker_detail_screen.dart';
@@ -49,21 +47,27 @@ import '../../features/categories/presentation/categories_view.dart';
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 final routerProvider = Provider<GoRouter>((ref) {
-  final bool isAuth = ref.watch(isAuthenticatedProvider);
+  // Listen to auth changes without destroying the GoRouter instance
+  final authNotifier = ValueNotifier<bool>(ref.read(isAuthenticatedProvider));
+  ref.onDispose(authNotifier.dispose);
+
+  ref.listen<bool>(isAuthenticatedProvider, (_, next) {
+    authNotifier.value = next;
+  });
 
   return GoRouter(
     navigatorKey: rootNavigatorKey,
     initialLocation: AppRoutes.login,
+    refreshListenable: authNotifier,
 
     // ==========================================
     // 2. GLOBAL REDIRECT LOGIC
     // ==========================================
     redirect: (context, state) {
-      final isAuthScreen =
-          state.matchedLocation == AppRoutes.login ||
-          state.matchedLocation == '/forgot-password' ||
-          state.matchedLocation == '/otp' ||
-          state.matchedLocation == '/reset-password';
+      final bool isAuth = ref.read(isAuthenticatedProvider);
+      final String location = state.matchedLocation;
+
+      final bool isAuthScreen = location == AppRoutes.login;
 
       // Not logged in, trying to access a protected route
       if (!isAuth && !isAuthScreen) {
@@ -75,7 +79,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         return AppRoutes.home;
       }
 
-      return null; // No redirect needed
+      return null;
     },
 
     routes: [
@@ -85,25 +89,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.login,
         builder: (context, state) => const LoginScreen(),
-      ),
-      GoRoute(
-        path: '/forgot-password',
-        builder: (context, state) => const ForgotPasswordScreen(),
-      ),
-      GoRoute(
-        path: '/otp',
-        builder: (context, state) {
-          final identifier = state.uri.queryParameters['identifier'] ?? '';
-          return OtpScreen(identifier: identifier);
-        },
-      ),
-      GoRoute(
-        path: '/reset-password',
-        builder: (context, state) {
-          final identifier = state.uri.queryParameters['identifier'] ?? '';
-          final otp = state.uri.queryParameters['otp'] ?? '';
-          return ResetPasswordScreen(identifier: identifier, otp: otp);
-        },
       ),
 
       // ==========================================
@@ -135,18 +120,34 @@ final routerProvider = Provider<GoRouter>((ref) {
         },
       ),
 
-      // --- Dedicated Jobs List ---
+      // --- Dedicated Jobs List (Supports BOTH `/jobs/list?status=X` AND `/jobs/list/X`) ---
       GoRoute(
-        path: '${AppRoutes.jobsList}/:status',
+        path: AppRoutes.jobList, // '/jobs/list'
         builder: (context, state) {
-          final status = state.pathParameters['status']!;
-          return JobsListScreen(initialStatus: status);
+          final status = state.uri.queryParameters['status'];
+          return JobListScreen(status: status);
         },
+        routes: [
+          GoRoute(
+            path: ':status', // Matches '/jobs/list/ONGOING'
+            builder: (context, state) {
+              final status = state.pathParameters['status'];
+              return JobListScreen(status: status);
+            },
+          ),
+        ],
       ),
 
-      // --- Job Detail Screen ---
+      // --- Job Detail Screen (Supports BOTH `/job/:id` AND `/jobs/detail/:id`) ---
       GoRoute(
-        path: '${AppRoutes.jobDetail}/:id',
+        path: '${AppRoutes.jobDetail}/:id', // '/job/:id'
+        builder: (context, state) {
+          final jobId = state.pathParameters['id']!;
+          return JobDetailScreen(jobId: jobId);
+        },
+      ),
+      GoRoute(
+        path: '${AppRoutes.jobsDetail}/:id', // '/jobs/detail/:id'
         builder: (context, state) {
           final jobId = state.pathParameters['id']!;
           return JobDetailScreen(jobId: jobId);
@@ -164,10 +165,8 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       // --- Workers Sub-Routes ---
       GoRoute(
-        path: AppRoutes
-            .workersList, // Maps to context.push('/workers/list?authStatus=X')
+        path: AppRoutes.workersList, // '/workers/list?authStatus=X&modStatus=Y'
         builder: (context, state) {
-          // ✅ FIX: Correctly extract query params for filtering the list
           final authStatus = state.uri.queryParameters['authStatus'];
           final modStatus = state.uri.queryParameters['modStatus'];
           return WorkersListScreen(
@@ -177,7 +176,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(
-        path: '${AppRoutes.workerDetail}/:id', // Maps to context.push('/worker/:id')
+        path: '${AppRoutes.workerDetail}/:id', // '/worker/:id'
         builder: (context, state) {
           final workerId = state.pathParameters['id']!;
           return WorkerDetailScreen(workerId: workerId);
@@ -234,7 +233,7 @@ final routerProvider = Provider<GoRouter>((ref) {
             routes: [
               GoRoute(
                 path: AppRoutes.workers,
-                builder: (context, state) => const WorkersDashboardScreen(), // ✅ Ensures bottom nav opens the Dashboard
+                builder: (context, state) => const WorkersDashboardScreen(),
               ),
             ],
           ),

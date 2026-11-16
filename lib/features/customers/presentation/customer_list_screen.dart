@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/network/api_exceptions.dart';
+import '../../../core/router/route_names.dart';
+import '../../../core/socket/socket_service.dart';
 import '../../../shared/widgets/global_error_widget.dart';
-import '../../../core/socket/socket_service.dart'; // ✅ Required for real-time presence
-import '../providers/customers_list_provider.dart';
 import '../data/customer_model.dart';
+import '../providers/customers_list_provider.dart';
+
+enum _CustomerQuickFilter { all, online, active, blocked }
 
 class CustomersScreen extends ConsumerStatefulWidget {
   const CustomersScreen({super.key});
@@ -18,28 +21,34 @@ class CustomersScreen extends ConsumerStatefulWidget {
 
 class _CustomersScreenState extends ConsumerState<CustomersScreen> {
   final ScrollController _scrollController = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
+  late final SocketService _socketService;
+
+  String _searchQuery = '';
+  _CustomerQuickFilter _selectedFilter = _CustomerQuickFilter.all;
 
   @override
   void initState() {
     super.initState();
     _scrollController.addListener(_onScroll);
 
-    // ✅ Listen to Socket events
-    ref
-        .read(socketServiceProvider)
-        .listen('user_status_changed', _onUserStatusChanged);
+    // Cache SocketService reference so we can safely detach in dispose()
+    _socketService = ref.read(socketServiceProvider);
+    _socketService.listen('user_status_changed', _onUserStatusChanged);
   }
 
   void _onUserStatusChanged(dynamic data) {
-    if (!mounted) return;
+    if (!mounted || data is! Map) return;
     try {
-      final userId = data['userId'] as String;
-      final isOnline = data['isOnline'] as bool;
-      final lastSeenStr = data['lastSeen'] as String?;
+      final userId = data['userId']?.toString();
+      if (userId == null || userId.isEmpty) return;
 
-      final lastSeen = lastSeenStr != null ? DateTime.parse(lastSeenStr) : null;
+      final isOnline = data['isOnline'] == true;
+      final lastSeenStr = data['lastSeen']?.toString();
+      final lastSeen = lastSeenStr != null
+          ? DateTime.tryParse(lastSeenStr)
+          : null;
 
-      // ✅ Instantly update Riverpod state so the UI reacts without API calls
       ref
           .read(customersListProvider.notifier)
           .updateCustomerStatus(userId, isOnline, lastSeen);
@@ -49,23 +58,22 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
   }
 
   void _onScroll() {
-    // ✅ FIX: Added subtraction operator
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
+    if (!_scrollController.hasClients) return;
+    final double threshold = _scrollController.position.maxScrollExtent - 200.0;
+    if (_scrollController.position.pixels >= threshold) {
       ref.read(customersListProvider.notifier).loadMore();
     }
   }
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
-    ref
-        .read(socketServiceProvider)
-        .stopListening('user_status_changed', _onUserStatusChanged);
+    _searchController.dispose();
+    _socketService.stopListening('user_status_changed', _onUserStatusChanged);
     super.dispose();
   }
 
-  // ✅ Helper method to format "last seen" time nicely
   String _formatLastSeen(DateTime date) {
     final localDate = date.toLocal();
     final now = DateTime.now();
@@ -86,6 +94,41 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
     return 'Был(а) $dateString в $timeString';
   }
 
+  List<CustomerModel> _applyLocalFilters(List<CustomerModel> customers) {
+    return customers.where((c) {
+      // 1. Apply status chip filter
+      switch (_selectedFilter) {
+        case _CustomerQuickFilter.online:
+          if (!c.isOnline) return false;
+          break;
+        case _CustomerQuickFilter.active:
+          if (!c.isActive) return false;
+          break;
+        case _CustomerQuickFilter.blocked:
+          if (c.isActive) return false;
+          break;
+        case _CustomerQuickFilter.all:
+          break;
+      }
+
+      // 2. Apply search query filter
+      if (_searchQuery.isEmpty) return true;
+      final q = _searchQuery.toLowerCase();
+      final nameMatch = c.name.toLowerCase().contains(q);
+      final phoneMatch = (c.mobile ?? '').toLowerCase().contains(q);
+      final emailMatch = (c.email ?? '').toLowerCase().contains(q);
+      final cityMatch = (c.city ?? '').toLowerCase().contains(q);
+      return nameMatch || phoneMatch || emailMatch || cityMatch;
+    }).toList();
+  }
+
+  Future<void> _openCustomerDetail(String customerId) async {
+    await context.push('${AppRoutes.customerDetail}/$customerId');
+    if (mounted) {
+      ref.invalidate(customersListProvider);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final listAsync = ref.watch(customersListProvider);
@@ -94,6 +137,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         title: const Text(
           'Клиенты',
@@ -102,64 +146,201 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              LucideIcons.refresh_cw,
+              size: 18,
+              color: Color(0xFF0F172A),
+            ),
+            tooltip: 'Обновить список',
+            onPressed: () => ref.invalidate(customersListProvider),
+          ),
+        ],
       ),
-      body: listAsync.when(
-        loading: () => const Center(
-          child: CircularProgressIndicator(color: Color(0xFF0F172A)),
-        ),
-        error: (error, _) => GlobalErrorWidget(
-          message: error is ApiException
-              ? error.message
-              : 'Ошибка загрузки клиентов.',
-          onRetry: () => ref.invalidate(customersListProvider),
-        ),
-        data: (customers) {
-          if (customers.isEmpty) {
-            return const Center(
-              child: Text(
-                'Список клиентов пуст',
-                style: TextStyle(color: Colors.grey),
-              ),
-            );
-          }
-
-          return RefreshIndicator(
-            color: const Color(0xFF0F172A),
-            onRefresh: () async => ref.invalidate(customersListProvider),
-            child: ListView.separated(
-              controller: _scrollController,
-              padding: const EdgeInsets.all(16),
-              physics: const AlwaysScrollableScrollPhysics(),
-              itemCount: customers.length + 1,
-              separatorBuilder: (_, __) => const SizedBox(height: 12),
-              itemBuilder: (context, index) {
-                if (index == customers.length) {
-                  if (customers.length < 20) return const SizedBox.shrink();
-                  return const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: Center(
-                      child: CircularProgressIndicator(
-                        color: Color(0xFF0F172A),
+      body: Column(
+        children: [
+          // Search & Quick Filter Bar
+          Container(
+            color: Colors.white,
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _searchController,
+                  onChanged: (val) => setState(() => _searchQuery = val.trim()),
+                  decoration: InputDecoration(
+                    hintText: 'Поиск по имени, телефону, email или городу...',
+                    prefixIcon: const Icon(LucideIcons.search, size: 18),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(LucideIcons.x, size: 16),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _searchQuery = '');
+                            },
+                          )
+                        : null,
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xFFF8FAFC),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _buildFilterChip('Все', _CustomerQuickFilter.all),
+                      const SizedBox(width: 8),
+                      _buildFilterChip('В сети', _CustomerQuickFilter.online),
+                      const SizedBox(width: 8),
+                      _buildFilterChip('Активные', _CustomerQuickFilter.active),
+                      const SizedBox(width: 8),
+                      _buildFilterChip(
+                        'Заблокированные',
+                        _CustomerQuickFilter.blocked,
                       ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+
+          // Customers List
+          Expanded(
+            child: listAsync.when(
+              loading: () => const Center(
+                child: CircularProgressIndicator(color: Color(0xFF0F172A)),
+              ),
+              error: (error, _) => GlobalErrorWidget(
+                message: error is ApiException
+                    ? error.message
+                    : 'Ошибка загрузки клиентов.',
+                onRetry: () => ref.invalidate(customersListProvider),
+              ),
+              data: (customers) {
+                final filtered = _applyLocalFilters(customers);
+
+                if (filtered.isEmpty) {
+                  final double emptyHeight =
+                      MediaQuery.sizeOf(context).height * 0.55;
+
+                  return RefreshIndicator(
+                    color: const Color(0xFF0F172A),
+                    onRefresh: () async {
+                      ref.invalidate(customersListProvider);
+                    },
+                    child: ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        SizedBox(
+                          height: emptyHeight,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                LucideIcons.users,
+                                size: 60,
+                                color: Colors.grey.shade300,
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                customers.isEmpty ? 'Список клиентов пуст' : 'По выбранным фильтрам клиенты не найдены',
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                     ),
                   );
                 }
 
-                return _buildCustomerCard(context, customers[index]);
+                final bool showBottomLoader =
+                    _searchQuery.isEmpty &&
+                    _selectedFilter == _CustomerQuickFilter.all &&
+                    customers.length >= 20;
+
+                return RefreshIndicator(
+                  color: const Color(0xFF0F172A),
+                  onRefresh: () async => ref.invalidate(customersListProvider),
+                  child: ListView.separated(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.all(16),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    itemCount: filtered.length + (showBottomLoader ? 1 : 0),
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      if (index == filtered.length) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 24),
+                          child: Center(
+                            child: CircularProgressIndicator(
+                              color: Color(0xFF0F172A),
+                            ),
+                          ),
+                        );
+                      }
+
+                      return _buildCustomerCard(context, filtered[index]);
+                    },
+                  ),
+                );
               },
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
 
+  Widget _buildFilterChip(String label, _CustomerQuickFilter filter) {
+    final isSelected = _selectedFilter == filter;
+    return ChoiceChip(
+      label: Text(label),
+      selected: isSelected,
+      onSelected: (_) => setState(() => _selectedFilter = filter),
+      selectedColor: const Color(0xFF0F172A),
+      backgroundColor: const Color(0xFFF8FAFC),
+      labelStyle: TextStyle(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w600,
+        color: isSelected ? Colors.white : const Color(0xFF0F172A),
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(
+          color: isSelected ? const Color(0xFF0F172A) : Colors.grey.shade300,
+        ),
+      ),
+      showCheckmark: false,
+    );
+  }
+
   Widget _buildCustomerCard(BuildContext context, CustomerModel customer) {
+    final hasImage =
+        customer.image != null && customer.image!.trim().isNotEmpty;
+
     return Container(
       decoration: BoxDecoration(
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withValues(alpha: 0.02),
             blurRadius: 8,
             offset: const Offset(0, 2),
           ),
@@ -170,23 +351,23 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
         borderRadius: BorderRadius.circular(16),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () => context.push('/customers/detail/${customer.id}'),
+          onTap: () => _openCustomerDetail(customer.id),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // ✅ Overlay Status Dot using a Stack
+                // Avatar with Online Presence Dot
                 Stack(
                   children: [
                     CircleAvatar(
                       radius: 28,
                       backgroundColor: const Color(0xFF0F172A)
-                          .withOpacity(0.05),
-                      backgroundImage: customer.image != null
+                          .withValues(alpha: 0.05),
+                      backgroundImage: hasImage
                           ? NetworkImage(customer.image!)
                           : null,
-                      child: customer.image == null
+                      child: !hasImage
                           ? const Icon(LucideIcons.user, color: Colors.grey)
                           : null,
                     ),
@@ -201,10 +382,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                               ? Colors.green
                               : Colors.grey.shade400,
                           shape: BoxShape.circle,
-                          border: Border.all(
-                            color: Colors.white,
-                            width: 2,
-                          ), // Separates dot from avatar
+                          border: Border.all(color: Colors.white, width: 2),
                         ),
                       ),
                     ),
@@ -223,6 +401,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                               style: const TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 16,
+                                color: Color(0xFF0F172A),
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -243,6 +422,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                                 style: TextStyle(
                                   color: Colors.red,
                                   fontSize: 10,
+                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
                             ),
@@ -250,7 +430,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                       ),
                       const SizedBox(height: 4),
 
-                      // ✅ Real-time online text format
+                      // Real-time online text format
                       if (customer.isOnline)
                         const Text(
                           'В сети',
@@ -275,15 +455,22 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                         ),
                       const SizedBox(height: 4),
 
-                      if (customer.mobile != null || customer.email != null)
+                      if ((customer.mobile != null &&
+                              customer.mobile!.isNotEmpty) ||
+                          (customer.email != null &&
+                              customer.email!.isNotEmpty))
                         Text(
-                          customer.mobile ?? customer.email!,
+                          (customer.mobile != null &&
+                                  customer.mobile!.isNotEmpty)
+                              ? customer.mobile!
+                              : customer.email!,
                           style: const TextStyle(
                             color: Colors.grey,
                             fontSize: 13,
                           ),
                         ),
-                      if (customer.city != null) ...[
+                      if (customer.city != null &&
+                          customer.city!.trim().isNotEmpty) ...[
                         const SizedBox(height: 4),
                         Row(
                           children: [
@@ -293,11 +480,15 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                               color: Colors.grey,
                             ),
                             const SizedBox(width: 4),
-                            Text(
-                              customer.city!,
-                              style: const TextStyle(
-                                color: Colors.grey,
-                                fontSize: 12,
+                            Expanded(
+                              child: Text(
+                                customer.city!,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.grey,
+                                  fontSize: 12,
+                                ),
                               ),
                             ),
                           ],
@@ -306,6 +497,7 @@ class _CustomersScreenState extends ConsumerState<CustomersScreen> {
                     ],
                   ),
                 ),
+                const Icon(LucideIcons.chevron_right, color: Colors.grey),
               ],
             ),
           ),

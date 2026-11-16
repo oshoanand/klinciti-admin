@@ -1,12 +1,21 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../providers/workers_provider.dart';
 
 class WorkersDashboardScreen extends ConsumerWidget {
   const WorkersDashboardScreen({super.key});
+
+  Future<void> _navigateToFilteredList(
+    BuildContext context,
+    WidgetRef ref,
+    String route,
+  ) async {
+    await context.push(route);
+    ref.invalidate(workerStatsProvider);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -17,18 +26,52 @@ class WorkersDashboardScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text(
           'Управление мастерами',
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF0F172A),
+          ),
         ),
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
+        actions: [
+          IconButton(
+            icon: const Icon(
+              LucideIcons.refresh_cw,
+              size: 18,
+              color: Color(0xFF0F172A),
+            ),
+            tooltip: 'Обновить статистику',
+            onPressed: () => ref.invalidate(workerStatsProvider),
+          ),
+        ],
       ),
       body: statsAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (err, _) => Center(child: Text('Ошибка: $err')),
+        loading: () => const Center(
+          child: CircularProgressIndicator(color: Color(0xFF0F172A)),
+        ),
+        error: (err, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Ошибка загрузки статистики: $err'),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: () => ref.invalidate(workerStatsProvider),
+                child: const Text('Повторить'),
+              ),
+            ],
+          ),
+        ),
         data: (stats) {
           return RefreshIndicator(
-            onRefresh: () async => ref.refresh(workerStatsProvider),
+            color: const Color(0xFF0F172A),
+            onRefresh: () async {
+              ref.invalidate(workerStatsProvider);
+              await ref.read(workerStatsProvider.future);
+            },
             child: GridView.count(
+              physics: const AlwaysScrollableScrollPhysics(),
               crossAxisCount: 2,
               padding: const EdgeInsets.all(16),
               crossAxisSpacing: 16,
@@ -40,7 +83,11 @@ class WorkersDashboardScreen extends ConsumerWidget {
                   count: stats['PENDING_MODERATION'] ?? 0,
                   icon: LucideIcons.user_search,
                   color: Colors.orange,
-                  onTap: () => context.push('/workers/list?modStatus=PENDING'),
+                  onTap: () => _navigateToFilteredList(
+                    context,
+                    ref,
+                    '/workers/list?modStatus=PENDING',
+                  ),
                 ),
                 _buildGridCard(
                   context,
@@ -48,7 +95,9 @@ class WorkersDashboardScreen extends ConsumerWidget {
                   count: stats['ACTIVE'] ?? 0,
                   icon: LucideIcons.user_check,
                   color: Colors.green,
-                  onTap: () => context.push(
+                  onTap: () => _navigateToFilteredList(
+                    context,
+                    ref,
                     '/workers/list?authStatus=ACTIVE&modStatus=APPROVED',
                   ),
                 ),
@@ -58,7 +107,11 @@ class WorkersDashboardScreen extends ConsumerWidget {
                   count: stats['BLOCKED'] ?? 0,
                   icon: LucideIcons.user_x,
                   color: Colors.red,
-                  onTap: () => context.push('/workers/list?authStatus=BLOCKED'),
+                  onTap: () => _navigateToFilteredList(
+                    context,
+                    ref,
+                    '/workers/list?authStatus=BLOCKED',
+                  ),
                 ),
                 _buildGridCard(
                   context,
@@ -66,7 +119,11 @@ class WorkersDashboardScreen extends ConsumerWidget {
                   count: stats['REJECTED'] ?? 0,
                   icon: LucideIcons.ban,
                   color: Colors.grey.shade700,
-                  onTap: () => context.push('/workers/list?modStatus=REJECTED'),
+                  onTap: () => _navigateToFilteredList(
+                    context,
+                    ref,
+                    '/workers/list?modStatus=REJECTED',
+                  ),
                 ),
               ],
             ),
@@ -93,7 +150,7 @@ class WorkersDashboardScreen extends ConsumerWidget {
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.04),
+              color: Colors.black.withValues(alpha: 0.04),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -106,7 +163,7 @@ class WorkersDashboardScreen extends ConsumerWidget {
             Container(
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.1),
+                color: color.withValues(alpha: 0.1),
                 shape: BoxShape.circle,
               ),
               child: Icon(icon, color: color),
@@ -114,8 +171,13 @@ class WorkersDashboardScreen extends ConsumerWidget {
             const Spacer(),
             Text(
               count.toString(),
-              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF0F172A),
+              ),
             ),
+            const SizedBox(height: 2),
             Text(
               title,
               style: TextStyle(

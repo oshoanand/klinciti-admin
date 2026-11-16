@@ -1,4 +1,5 @@
 class AppRoutes {
+  // Auth
   static const String login = '/login';
 
   // Bottom Navigation Tabs
@@ -8,14 +9,17 @@ class AppRoutes {
   static const String chatList = '/chats';
   static const String profileDummy = '/profile';
 
-  // Dedicated Jobs List Screen
-  static const String jobsList = '/jobs-list';
+  // Jobs Routes (Both `jobList` and `jobsList` supported for compatibility)
+  static const String jobDashboard = '/dashboard';
+  static const String jobList = '/jobs/list';
+  static const String jobsList = '/jobs/list';
   static const String jobDetail = '/job';
+  static const String jobsDetail = '/jobs/detail';
 
   // Chat Routes
   static const String chatDetail = '/chat';
 
-  // Other routes
+  // Profile, Support & Notifications
   static const String support = '/support';
   static const String notifications = '/notifications';
   static const String profileEdit = '/profile/edit';

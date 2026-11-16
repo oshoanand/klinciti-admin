@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/network/api_exceptions.dart';
 import '../../../shared/widgets/global_error_widget.dart';
-import '../providers/workers_provider.dart';
 import '../data/worker_model.dart';
+import '../providers/workers_provider.dart';
 
 class WorkersListScreen extends ConsumerStatefulWidget {
   final String? authStatus;
@@ -20,7 +20,7 @@ class WorkersListScreen extends ConsumerStatefulWidget {
 
 class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
   final ScrollController _scrollController = ScrollController();
-  late final WorkerFilter _filter;
+  late WorkerFilter _filter;
 
   @override
   void initState() {
@@ -33,12 +33,28 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
   }
 
   @override
+  void didUpdateWidget(covariant WorkersListScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.authStatus != widget.authStatus ||
+        oldWidget.modStatus != widget.modStatus) {
+      setState(() {
+        _filter = WorkerFilter(
+          authStatus: widget.authStatus,
+          moderationStatus: widget.modStatus,
+        );
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
 
   void _onScroll() {
+    if (!_scrollController.hasClients) return;
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent - 200) {
       ref.read(workersListProvider(_filter).notifier).loadMore();
@@ -55,14 +71,24 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
     return 'Мастера';
   }
 
+  Future<void> _openWorkerDetail(String workerId) async {
+    await context.push('/worker/$workerId');
+    if (mounted) {
+      ref.invalidate(workersListProvider(_filter));
+      ref.invalidate(workerStatsProvider);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final workersAsync = ref.watch(workersListProvider(_filter));
+    final notifier = ref.read(workersListProvider(_filter).notifier);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(LucideIcons.arrow_left, color: Color(0xFF0F172A)),
@@ -75,6 +101,17 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              LucideIcons.refresh_cw,
+              size: 18,
+              color: Color(0xFF0F172A),
+            ),
+            tooltip: 'Обновить',
+            onPressed: () => ref.invalidate(workersListProvider(_filter)),
+          ),
+        ],
       ),
       body: workersAsync.when(
         loading: () => const Center(
@@ -92,22 +129,34 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
         },
         data: (workers) {
           if (workers.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+            return RefreshIndicator(
+              color: const Color(0xFF0F172A),
+              onRefresh: () async {
+                ref.invalidate(workersListProvider(_filter));
+              },
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
                 children: [
-                  Icon(
-                    LucideIcons.users,
-                    size: 64,
-                    color: Colors.grey.shade300,
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Список пуст',
-                    style: TextStyle(
-                      color: Colors.grey,
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
+                  SizedBox(
+                    height: MediaQuery.of(context).size.height * 0.65,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          LucideIcons.users,
+                          size: 64,
+                          color: Colors.grey.shade300,
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Список пуст',
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -124,12 +173,10 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
               controller: _scrollController,
               padding: const EdgeInsets.all(16),
               physics: const AlwaysScrollableScrollPhysics(),
-              itemCount: workers.length + 1,
+              itemCount: workers.length + (notifier.hasMore ? 1 : 0),
               separatorBuilder: (_, __) => const SizedBox(height: 12),
               itemBuilder: (context, index) {
                 if (index == workers.length) {
-                  // Show loading indicator at the bottom if fetching more
-                  if (workers.length < 20) return const SizedBox.shrink();
                   return const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Center(
@@ -151,11 +198,14 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
   }
 
   Widget _buildWorkerCard(BuildContext context, WorkerModel worker) {
+    final hasAvatar =
+        worker.avatarUrl != null && worker.avatarUrl!.trim().isNotEmpty;
+
     return Container(
       decoration: BoxDecoration(
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.03),
+            color: Colors.black.withValues(alpha: 0.03),
             blurRadius: 10,
             offset: const Offset(0, 4),
           ),
@@ -166,10 +216,7 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
         borderRadius: BorderRadius.circular(16),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () {
-            // Route to Worker Detail Screen
-            context.push('/worker/${worker.id}');
-          },
+          onTap: () => _openWorkerDetail(worker.id),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
@@ -178,10 +225,10 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
                 CircleAvatar(
                   radius: 30,
                   backgroundColor: Colors.grey.shade100,
-                  backgroundImage: worker.avatarUrl != null
+                  backgroundImage: hasAvatar
                       ? NetworkImage(worker.avatarUrl!)
                       : null,
-                  child: worker.avatarUrl == null
+                  child: !hasAvatar
                       ? const Icon(LucideIcons.hard_hat, color: Colors.grey)
                       : null,
                 ),
@@ -193,7 +240,7 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        worker.name,
+                        worker.fullName,
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
@@ -220,7 +267,10 @@ class _WorkersListScreenState extends ConsumerState<WorkersListScreen> {
                             const SizedBox(width: 4),
                             Expanded(
                               child: Text(
-                                worker.vehicleModel ?? 'С автомобилем',
+                                (worker.vehicleModel != null &&
+                                        worker.vehicleModel!.trim().isNotEmpty)
+                                    ? worker.vehicleModel!
+                                    : 'С автомобилем',
                                 style: const TextStyle(
                                   color: Colors.blue,
                                   fontSize: 12,
