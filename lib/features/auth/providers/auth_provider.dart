@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer';
 
@@ -29,48 +30,78 @@ final authControllerProvider = Provider<AuthController>((ref) {
 });
 
 // ==========================================
-// 4. AUTH CONTROLLER IMPLEMENTATION
+// 4. AUTH CONTROLLER IMPLEMENTATION (ADMIN APP)
 // ==========================================
 class AuthController {
+  static const String _jwtKey = 'jwt_token';
+  static const String _userIdKey = 'user_id';
+  static const String _userDataKey = 'user_data';
+  static const Set<String> _allowedAdminRoles = {'ADMINISTRATOR', 'SUPPORT'};
+
   final ApiClient _api;
   final Ref _ref;
 
   AuthController(this._api, this._ref);
 
   // ------------------------------------------
+  // IDENTIFIER NORMALIZATION
+  // ------------------------------------------
+  String normalizeIdentifier(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.contains('@')) {
+      return trimmed.toLowerCase();
+    }
+    final digits = trimmed.replaceAll(RegExp(r'\D'), '');
+    if (digits.length == 10) return '7$digits';
+    if (digits.length == 11 && digits.startsWith('8')) {
+      return '7${digits.substring(1)}';
+    }
+    return digits;
+  }
+
+  // ------------------------------------------
   // APP STARTUP CHECK
   // ------------------------------------------
   Future<void> checkInitialAuth() async {
     try {
-      final token = await _api.storage.read(key: 'jwt_token');
-      final userId = await _api.storage.read(key: 'user_id');
-      final userDataStr = await _api.storage.read(key: 'user_data');
+      final results = await Future.wait([
+        _api.storage.read(key: _jwtKey),
+        _api.storage.read(key: _userIdKey),
+        _api.storage.read(key: _userDataKey),
+      ]);
+
+      final token = results[0];
+      final userId = results[1];
+      final userDataStr = results[2];
 
       if (token != null &&
           token.isNotEmpty &&
           userId != null &&
-          userDataStr != null) {
-        final userData = jsonDecode(userDataStr) as Map<String, dynamic>;
+          userId.isNotEmpty &&
+          userDataStr != null &&
+          userDataStr.isNotEmpty) {
+        final decoded = jsonDecode(userDataStr);
+        if (decoded is! Map) {
+          throw const FormatException('Corrupt user_data format');
+        }
+
+        final userData = Map<String, dynamic>.from(decoded);
+        final role = (userData['role'] ?? '').toString().toUpperCase();
+        if (role.isNotEmpty && !_allowedAdminRoles.contains(role)) {
+          await clearSession();
+          return;
+        }
+
         _ref.read(currentUserProvider.notifier).state = userData;
         _ref.read(isAuthenticatedProvider.notifier).state = true;
 
-        try {
-          final mobile = userData['mobile']?.toString();
-          final notifService = _ref.read(notificationServiceProvider);
-
-          await notifService.registerTokenAfterLogin();
-          await notifService.subscribeToUserTopics(mobile);
-          await _ref.read(socketServiceProvider).connect(userId);
-        } catch (e) {
-          log('FCM/Socket Setup Error (Ignored): $e');
-        }
+        unawaited(_initRealtimeServices(userId));
       } else {
-        _ref.read(isAuthenticatedProvider.notifier).state = false;
-        _ref.read(currentUserProvider.notifier).state = null;
+        await clearSession();
       }
     } catch (e) {
-      _ref.read(isAuthenticatedProvider.notifier).state = false;
-      _ref.read(currentUserProvider.notifier).state = null;
+      log('⚠️ Admin initial auth check failed, clearing corrupt session: $e');
+      await clearSession();
     }
   }
 
@@ -81,17 +112,31 @@ class AuthController {
     try {
       final response = await _api.dio.post(
         '/auth/admin/login',
-        data: {'identifier': identifier, 'password': password},
+        data: {
+          'identifier': normalizeIdentifier(identifier),
+          'password': password,
+        },
       );
 
-      if (response.data['needsVerification'] == true) {
-        return false; // Tells the UI to route to the OTP screen
+      if (response.data is! Map) {
+        throw ApiException('Некорректный ответ сервера при входе');
       }
 
-      await saveSession(response.data);
-      return true; // Success, tell UI to route Home
+      final map = Map<String, dynamic>.from(response.data as Map);
+      final payload = map['data'] is Map
+          ? Map<String, dynamic>.from(map['data'] as Map)
+          : map;
+
+      if (payload['needsVerification'] == true ||
+          payload['requiresOtp'] == true) {
+        return false; // Route UI to OTP verification
+      }
+
+      await saveSession(map);
+      return true;
     } catch (e) {
-      throw e is ApiException ? e : ApiException.fromDioException(e as dynamic);
+      if (e is ApiException) rethrow;
+      throw ApiException.fromDioException(e);
     }
   }
 
@@ -102,10 +147,11 @@ class AuthController {
     try {
       await _api.dio.post(
         '/auth/forgot-password',
-        data: {'identifier': identifier},
+        data: {'identifier': normalizeIdentifier(identifier)},
       );
     } catch (e) {
-      throw e is ApiException ? e : ApiException.fromDioException(e as dynamic);
+      if (e is ApiException) rethrow;
+      throw ApiException.fromDioException(e);
     }
   }
 
@@ -121,20 +167,43 @@ class AuthController {
       final res = await _api.dio.post(
         '/auth/verify-otp',
         data: {
-          'identifier': identifier,
-          'otp': otp,
+          'identifier': normalizeIdentifier(identifier),
+          'otp': otp.trim(),
           'context': contextType.name.toUpperCase(),
         },
       );
 
       if (contextType == OtpContext.reset) {
         return true;
-      } else {
-        await saveSession(res.data);
-        return true;
       }
+
+      if (res.data is! Map) {
+        throw ApiException('Некорректный ответ сервера при проверке кода');
+      }
+
+      await saveSession(Map<String, dynamic>.from(res.data as Map));
+      return true;
     } catch (e) {
-      throw e is ApiException ? e : ApiException.fromDioException(e as dynamic);
+      if (e is ApiException) rethrow;
+      throw ApiException.fromDioException(e);
+    }
+  }
+
+  // ------------------------------------------
+  // RESEND OTP
+  // ------------------------------------------
+  Future<void> resendOtp(String identifier, OtpContext contextType) async {
+    try {
+      await _api.dio.post(
+        '/auth/resend-otp',
+        data: {
+          'identifier': normalizeIdentifier(identifier),
+          'context': contextType.name.toUpperCase(),
+        },
+      );
+    } catch (e) {
+      if (e is ApiException) rethrow;
+      throw ApiException.fromDioException(e);
     }
   }
 
@@ -150,88 +219,119 @@ class AuthController {
       await _api.dio.post(
         '/auth/reset-password',
         data: {
-          'identifier': identifier,
-          'otp': otp,
+          'identifier': normalizeIdentifier(identifier),
+          'otp': otp.trim(),
           'newPassword': newPassword,
         },
       );
     } catch (e) {
-      throw e is ApiException ? e : ApiException.fromDioException(e as dynamic);
+      if (e is ApiException) rethrow;
+      throw ApiException.fromDioException(e);
     }
   }
 
   // ------------------------------------------
-  // SAVE SESSION & CONNECT SOCKETS
+  // SAVE SESSION & CONNECT REAL-TIME SERVICES
   // ------------------------------------------
   Future<void> saveSession(Map<String, dynamic> data) async {
-    final token = data['accessToken'] ?? data['token'];
-    final userObject = data['user'];
-    final userId = userObject?['id'] ?? data['userId'];
+    final payload = data['data'] is Map
+        ? Map<String, dynamic>.from(data['data'] as Map)
+        : data;
 
-    if (token != null) {
-      await _api.storage.write(key: 'jwt_token', value: token);
+    final String token = (payload['accessToken'] ?? payload['token'] ?? '')
+        .toString()
+        .trim();
+    final Map<String, dynamic>? userObject = payload['user'] is Map
+        ? Map<String, dynamic>.from(payload['user'] as Map)
+        : null;
+    final String userId = (userObject?['id'] ?? payload['userId'] ?? '')
+        .toString()
+        .trim();
 
-      if (userId != null) {
-        await _api.storage.write(key: 'user_id', value: userId.toString());
-      }
-
-      if (userObject != null) {
-        await _api.storage.write(
-          key: 'user_data',
-          value: jsonEncode(userObject),
-        );
-
-        _ref.read(currentUserProvider.notifier).state =
-            Map<String, dynamic>.from(userObject);
-
-        try {
-          final mobile = userObject['mobile']?.toString();
-          final notifService = _ref.read(notificationServiceProvider);
-
-          await notifService.registerTokenAfterLogin();
-          await notifService.subscribeToUserTopics(mobile);
-          await _ref.read(socketServiceProvider).connect(userId.toString());
-        } catch (e) {
-          log('Setup Error on Login (Ignored): $e');
-        }
-      }
-
-      _ref.read(isAuthenticatedProvider.notifier).state = true;
+    if (token.isEmpty || userId.isEmpty) {
+      throw ApiException('Сервер не вернул токен или ID администратора');
     }
+
+    // Enforce Admin/Support role access
+    final String role = (userObject?['role'] ?? payload['role'] ?? '')
+        .toString()
+        .toUpperCase();
+    if (role.isNotEmpty && !_allowedAdminRoles.contains(role)) {
+      throw ApiException(
+        'Доступ запрещен: требуется учетная запись администратора или поддержки.',
+      );
+    }
+
+    await Future.wait([
+      _api.storage.write(key: _jwtKey, value: token),
+      _api.storage.write(key: _userIdKey, value: userId),
+      if (userObject != null)
+        _api.storage.write(key: _userDataKey, value: jsonEncode(userObject)),
+    ]);
+
+    if (userObject != null) {
+      _ref.read(currentUserProvider.notifier).state = userObject;
+    }
+    _ref.read(isAuthenticatedProvider.notifier).state = true;
+
+    unawaited(_initRealtimeServices(userId));
+  }
+
+  /// Syncs Riverpod state and secure storage after admin profile updates.
+  Future<void> updateCurrentUser(Map<String, dynamic> updatedFields) async {
+    final current = _ref.read(currentUserProvider) ?? <String, dynamic>{};
+    final merged = <String, dynamic>{...current, ...updatedFields};
+
+    _ref.read(currentUserProvider.notifier).state = merged;
+    await _api.storage.write(key: _userDataKey, value: jsonEncode(merged));
   }
 
   // ------------------------------------------
-  // LOGOUT
+  // LOGOUT & TEARDOWN
   // ------------------------------------------
   Future<void> logout(BuildContext context) async {
     try {
-      final currentUser = _ref.read(currentUserProvider);
-
-      if (currentUser != null) {
-        try {
-          await _api.dio.post('/fcm/remove-fcm', data: {});
-          final mobile = currentUser['mobile']?.toString();
-          await _ref
-              .read(notificationServiceProvider)
-              .unsubscribeFromTopics(mobile);
-        } catch (e) {
-          log('FCM Unsubscribe Error (Ignored): $e');
-        }
-      }
-    } catch (_) {
+      // Unregister THIS device's FCM token while JWT is still present
+      await _ref.read(notificationServiceProvider).unregisterTokenOnLogout();
+    } catch (e) {
+      log('⚠️ Admin FCM logout cleanup error (ignored): $e');
     } finally {
-      _ref.read(socketServiceProvider).disconnect();
-
-      await _api.storage.delete(key: 'jwt_token');
-      await _api.storage.delete(key: 'user_id');
-      await _api.storage.delete(key: 'user_data');
-
-      _ref.read(isAuthenticatedProvider.notifier).state = false;
-      _ref.read(currentUserProvider.notifier).state = null;
+      await clearSession();
 
       if (context.mounted) {
         context.go('/login');
       }
     }
+  }
+
+  /// Context-free teardown for 401 interceptors and corrupt-storage recovery.
+  Future<void> clearSession() async {
+    _ref.read(socketServiceProvider).disconnect();
+
+    await Future.wait([
+      _api.storage.delete(key: _jwtKey),
+      _api.storage.delete(key: _userIdKey),
+      _api.storage.delete(key: _userDataKey),
+    ]);
+
+    _ref.read(isAuthenticatedProvider.notifier).state = false;
+    _ref.read(currentUserProvider.notifier).state = null;
+  }
+
+  // ------------------------------------------
+  // REAL-TIME SERVICES (DECOUPLED)
+  // ------------------------------------------
+  Future<void> _initRealtimeServices(String userId) async {
+    await Future.wait([
+      _ref
+          .read(notificationServiceProvider)
+          .registerTokenAfterLogin()
+          .catchError((Object e) {
+            log('⚠️ Admin FCM token registration skipped: $e');
+          }),
+      _ref.read(socketServiceProvider).connect(userId).catchError((Object e) {
+        log('⚠️ Admin Socket connection skipped: $e');
+      }),
+    ]);
   }
 }

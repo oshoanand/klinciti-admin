@@ -7,11 +7,8 @@ import 'route_names.dart';
 // --- Layout ---
 import '../../shared/layouts/main_scaffold.dart';
 
-// --- Auth (Dedicated Screens) ---
+// --- Auth ---
 import '../../features/auth/presentation/auth_screen.dart';
-import '../../features/auth/presentation/forgot_password_screen.dart';
-import '../../features/auth/presentation/otp_screen.dart';
-import '../../features/auth/presentation/reset_password_screen.dart';
 import '../../features/auth/providers/auth_provider.dart';
 
 // --- Home & Jobs ---
@@ -41,46 +38,71 @@ import '../../features/staff/presentation/staff_detail_screen.dart';
 import '../../features/notifications/presentation/notifications_screen.dart';
 import '../../features/categories/presentation/categories_view.dart';
 
+import '../../features/finance/presentation/finance_screen.dart';
+
 // ==========================================
 // 1. GLOBAL NAVIGATOR KEY
 // ==========================================
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 final routerProvider = Provider<GoRouter>((ref) {
-  // Listen to auth changes without destroying the GoRouter instance
+  // Listen to auth changes without recreating the GoRouter instance
   final authNotifier = ValueNotifier<bool>(ref.read(isAuthenticatedProvider));
-  ref.onDispose(authNotifier.dispose);
 
   ref.listen<bool>(isAuthenticatedProvider, (_, next) {
     authNotifier.value = next;
   });
 
-  return GoRouter(
+  final router = GoRouter(
     navigatorKey: rootNavigatorKey,
     initialLocation: AppRoutes.login,
     refreshListenable: authNotifier,
 
     // ==========================================
-    // 2. GLOBAL REDIRECT LOGIC
+    // 2. GLOBAL REDIRECT LOGIC (With Deep-Link Preservation)
     // ==========================================
     redirect: (context, state) {
       final bool isAuth = ref.read(isAuthenticatedProvider);
       final String location = state.matchedLocation;
+      final String fullUri = state.uri.toString();
 
       final bool isAuthScreen = location == AppRoutes.login;
 
-      // Not logged in, trying to access a protected route
+      // Not logged in -> redirect to login, preserving intended deep link
       if (!isAuth && !isAuthScreen) {
+        if (location != '/' && location != AppRoutes.home) {
+          final encodedFrom = Uri.encodeComponent(fullUri);
+          return '${AppRoutes.login}?from=$encodedFrom';
+        }
         return AppRoutes.login;
       }
 
-      // Logged in, trying to access auth screens
+      // Logged in on login screen -> restore preserved deep link or go Home
       if (isAuth && isAuthScreen) {
+        final from = state.uri.queryParameters['from'];
+        if (from != null &&
+            from.startsWith('/') &&
+            !from.startsWith(AppRoutes.login)) {
+          return from;
+        }
         return AppRoutes.home;
+      }
+
+      // Root & legacy dashboard aliases
+      if (location == '/' || location == AppRoutes.jobDashboard) {
+        return isAuth ? AppRoutes.home : AppRoutes.login;
       }
 
       return null;
     },
+
+    // ==========================================
+    // 3. FALLBACK ERROR SCREEN
+    // ==========================================
+    errorBuilder: (context, state) => _RouteNotFoundScreen(
+      uri: state.uri.toString(),
+      isAuthenticated: ref.read(isAuthenticatedProvider),
+    ),
 
     routes: [
       // ==========================================
@@ -88,48 +110,67 @@ final routerProvider = Provider<GoRouter>((ref) {
       // ==========================================
       GoRoute(
         path: AppRoutes.login,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const LoginScreen(),
       ),
 
       // ==========================================
-      // FULL SCREEN PROTECTED ROUTES
+      // FULL-SCREEN PROTECTED ROUTES
       // ==========================================
       GoRoute(
         path: AppRoutes.profileEdit,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const ProfileEditScreen(),
       ),
       GoRoute(
         path: AppRoutes.support,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const SupportScreen(),
+      ),
+
+      // --- Finance Dashboard (Swap in FinanceScreen once created) ---
+      GoRoute(
+        path: AppRoutes.finance,
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) {
+          final tab =
+              int.tryParse(state.uri.queryParameters['tab'] ?? '0') ?? 0;
+          return FinanceScreen(initialTab: tab);
+        },
       ),
 
       // --- Staff Management ---
       GoRoute(
         path: AppRoutes.staffList,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const StaffListScreen(),
       ),
       GoRoute(
         path: AppRoutes.staffCreate,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const StaffCreateScreen(),
       ),
       GoRoute(
         path: '${AppRoutes.staffDetail}/:id',
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final staffId = state.pathParameters['id']!;
+          final staffId = state.pathParameters['id'] ?? '';
           return StaffDetailScreen(staffId: staffId);
         },
       ),
 
-      // --- Dedicated Jobs List (Supports BOTH `/jobs/list?status=X` AND `/jobs/list/X`) ---
+      // --- Jobs List (Supports BOTH `/jobs/list?status=X` AND `/jobs/list/X`) ---
       GoRoute(
-        path: AppRoutes.jobList, // '/jobs/list'
+        path: AppRoutes.jobList,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
           final status = state.uri.queryParameters['status'];
           return JobListScreen(status: status);
         },
         routes: [
           GoRoute(
-            path: ':status', // Matches '/jobs/list/ONGOING'
+            path: ':status',
+            parentNavigatorKey: rootNavigatorKey,
             builder: (context, state) {
               final status = state.pathParameters['status'];
               return JobListScreen(status: status);
@@ -138,34 +179,48 @@ final routerProvider = Provider<GoRouter>((ref) {
         ],
       ),
 
-      // --- Job Detail Screen (Supports BOTH `/job/:id` AND `/jobs/detail/:id`) ---
       GoRoute(
-        path: '${AppRoutes.jobDetail}/:id', // '/job/:id'
+        path: AppRoutes.finance,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final jobId = state.pathParameters['id']!;
+          final tab =
+              int.tryParse(state.uri.queryParameters['tab'] ?? '0') ?? 0;
+          return FinanceScreen(initialTab: tab);
+        },
+      ),
+
+      // --- Job Detail (Supports BOTH `/job/:id` AND `/jobs/detail/:id`) ---
+      GoRoute(
+        path: '${AppRoutes.jobDetail}/:id',
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) {
+          final jobId = state.pathParameters['id'] ?? '';
           return JobDetailScreen(jobId: jobId);
         },
       ),
       GoRoute(
-        path: '${AppRoutes.jobsDetail}/:id', // '/jobs/detail/:id'
+        path: '${AppRoutes.jobsDetail}/:id',
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final jobId = state.pathParameters['id']!;
+          final jobId = state.pathParameters['id'] ?? '';
           return JobDetailScreen(jobId: jobId);
         },
       ),
 
-      // --- Customer Detail Screen ---
+      // --- Customer Detail ---
       GoRoute(
         path: '${AppRoutes.customerDetail}/:id',
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final customerId = state.pathParameters['id']!;
+          final customerId = state.pathParameters['id'] ?? '';
           return CustomerDetailScreen(customerId: customerId);
         },
       ),
 
       // --- Workers Sub-Routes ---
       GoRoute(
-        path: AppRoutes.workersList, // '/workers/list?authStatus=X&modStatus=Y'
+        path: AppRoutes.workersList,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
           final authStatus = state.uri.queryParameters['authStatus'];
           final modStatus = state.uri.queryParameters['modStatus'];
@@ -176,9 +231,10 @@ final routerProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(
-        path: '${AppRoutes.workerDetail}/:id', // '/worker/:id'
+        path: '${AppRoutes.workerDetail}/:id',
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final workerId = state.pathParameters['id']!;
+          final workerId = state.pathParameters['id'] ?? '';
           return WorkerDetailScreen(workerId: workerId);
         },
       ),
@@ -186,27 +242,44 @@ final routerProvider = Provider<GoRouter>((ref) {
       // --- Notifications ---
       GoRoute(
         path: AppRoutes.notifications,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const NotificationsScreen(),
       ),
 
-      // --- Chat Detail ---
+      // --- Chat Detail (Supports BOTH `/chat/:sessionId` AND `/chat/:sessionId/:partnerId`) ---
       GoRoute(
-        path: '${AppRoutes.chatDetail}/:sessionId/:partnerId',
+        path: '${AppRoutes.chatDetail}/:sessionId',
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) {
-          final sessionId = state.pathParameters['sessionId']!;
-          final partnerId = state.pathParameters['partnerId']!;
+          final sessionId = state.pathParameters['sessionId'] ?? '';
+          final partnerId = state.uri.queryParameters['partnerId'] ?? '';
           return ChatDetailScreen(sessionId: sessionId, partnerId: partnerId);
         },
+        routes: [
+          GoRoute(
+            path: ':partnerId',
+            parentNavigatorKey: rootNavigatorKey,
+            builder: (context, state) {
+              final sessionId = state.pathParameters['sessionId'] ?? '';
+              final partnerId = state.pathParameters['partnerId'] ?? '';
+              return ChatDetailScreen(
+                sessionId: sessionId,
+                partnerId: partnerId,
+              );
+            },
+          ),
+        ],
       ),
 
       // --- Categories ---
       GoRoute(
         path: AppRoutes.categories,
+        parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const CategoriesView(),
       ),
 
       // ==========================================
-      // SHELL ROUTE (With Bottom Nav & Profile Drawer)
+      // SHELL ROUTE (Bottom Nav & Profile Drawer)
       // ==========================================
       StatefulShellRoute.indexedStack(
         builder: (context, state, navigationShell) {
@@ -257,4 +330,73 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ],
   );
+
+  ref.onDispose(() {
+    router.dispose();
+    authNotifier.dispose();
+  });
+
+  return router;
 });
+
+// ==========================================
+// 4. FALLBACK & PLACEHOLDER SCREENS
+// ==========================================
+class _RouteNotFoundScreen extends StatelessWidget {
+  final String uri;
+  final bool isAuthenticated;
+
+  const _RouteNotFoundScreen({
+    required this.uri,
+    required this.isAuthenticated,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8FAFC),
+      appBar: AppBar(title: const Text('Страница не найдена')),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.explore_off_outlined,
+                size: 56,
+                color: Color(0xFF94A3B8),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Маршрут не найден',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF0F172A),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                uri,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Color(0xFF64748B), fontSize: 13),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                onPressed: () => context.go(
+                  isAuthenticated ? AppRoutes.home : AppRoutes.login,
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF0F172A),
+                  foregroundColor: Colors.white,
+                ),
+                child: Text(isAuthenticated ? 'На главную' : 'Ко входу'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

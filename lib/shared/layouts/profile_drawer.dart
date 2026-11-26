@@ -1,18 +1,17 @@
-import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path/path.dart' as p;
-import 'package:dio/dio.dart';
 
-import '../../core/router/route_names.dart';
-import '../../features/auth/providers/auth_provider.dart';
 import '../../core/network/api_client.dart';
+import '../../core/router/route_names.dart';
 import '../../core/utils/phone_formatter.dart';
+import '../../features/auth/providers/auth_provider.dart';
 
 final isAvatarUploadingProvider = StateProvider.autoDispose<bool>(
   (ref) => false,
@@ -34,7 +33,7 @@ class ProfileDrawer extends ConsumerWidget {
     final picker = ImagePicker();
     final XFile? pickedImage = await picker.pickImage(
       source: source,
-      imageQuality: 70, // Compress slightly for faster uploads
+      imageQuality: 70,
       maxWidth: 800,
     );
 
@@ -52,8 +51,8 @@ class ProfileDrawer extends ConsumerWidget {
         '/admin/presigned-url',
         data: {'fileName': fileName, 'folderName': 'profileImage'},
       );
-      final String uploadUrl = presignedRes.data['presignedUrl'];
-      final String publicUrl = presignedRes.data['publicUrl'];
+      final String uploadUrl = presignedRes.data['presignedUrl'].toString();
+      final String publicUrl = presignedRes.data['publicUrl'].toString();
 
       // 2. Upload to MinIO directly
       final rawDio = Dio(
@@ -64,8 +63,9 @@ class ProfileDrawer extends ConsumerWidget {
       );
 
       String contentType = 'image/jpeg';
-      if (fileName.toLowerCase().endsWith('.png')) contentType = 'image/png';
-      if (fileName.toLowerCase().endsWith('.webp')) contentType = 'image/webp';
+      final lower = fileName.toLowerCase();
+      if (lower.endsWith('.png')) contentType = 'image/png';
+      if (lower.endsWith('.webp')) contentType = 'image/webp';
 
       await rawDio.put(
         uploadUrl,
@@ -78,28 +78,17 @@ class ProfileDrawer extends ConsumerWidget {
         ),
       );
 
-      // 3. Tell backend to save the URL to the user's profile
+      // 3. Save URL to backend profile
       await api.dio.patch(
         '/admin/photo',
         data: {'imageUrl': publicUrl, 'imageType': 'profileImage'},
       );
 
-      // 4. Update local Riverpod state and Secure Storage instantly!
-      final currentUser = ref.read(currentUserProvider);
-      if (currentUser != null) {
-        final updatedUser = Map<String, dynamic>.from(currentUser);
-        updatedUser['image'] = publicUrl; // Update local map
-
-        // Update global provider
-        ref.read(currentUserProvider.notifier).state = updatedUser;
-
-        // Save to secure storage so it survives app restarts
-        await api.storage.write(
-          key: 'user_data',
-          value: jsonEncode(updatedUser),
-        );
-      }
-    } catch (e) {
+      // 4. Update Riverpod state & secure storage atomically
+      await ref.read(authControllerProvider).updateCurrentUser({
+        'image': publicUrl,
+      });
+    } catch (_) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -119,7 +108,7 @@ class ProfileDrawer extends ConsumerWidget {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => SafeArea(
+      builder: (sheetCtx) => SafeArea(
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 16),
           child: Column(
@@ -135,7 +124,7 @@ class ProfileDrawer extends ConsumerWidget {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 onTap: () =>
-                    _pickAndUploadAvatar(context, ref, ImageSource.camera),
+                    _pickAndUploadAvatar(sheetCtx, ref, ImageSource.camera),
               ),
               ListTile(
                 leading: const Icon(
@@ -147,7 +136,7 @@ class ProfileDrawer extends ConsumerWidget {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 onTap: () =>
-                    _pickAndUploadAvatar(context, ref, ImageSource.gallery),
+                    _pickAndUploadAvatar(sheetCtx, ref, ImageSource.gallery),
               ),
             ],
           ),
@@ -173,13 +162,14 @@ class ProfileDrawer extends ConsumerWidget {
 
     final String? mobile = user?['mobile']?.toString();
     final String? email = user?['email']?.toString();
+    final String role = (user?['role'] ?? '').toString().toUpperCase();
+    final bool isAdmin = role.isEmpty || role == 'ADMINISTRATOR';
 
     return Drawer(
-      // ✅ FIXED: Missing multiplication symbol corrected to calculate width properly
       width: MediaQuery.of(context).size.width * 0.85,
       backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.horizontal(right: Radius.circular(32)),
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(8)),
       ),
       child: SafeArea(
         child: Column(
@@ -202,7 +192,6 @@ class ProfileDrawer extends ConsumerWidget {
                       ),
                       child: Row(
                         children: [
-                          // 📸 AVATAR STACK
                           GestureDetector(
                             onTap: () => _showImageSourcePicker(context, ref),
                             child: Stack(
@@ -213,7 +202,7 @@ class ProfileDrawer extends ConsumerWidget {
                                   height: 80,
                                   decoration: BoxDecoration(
                                     color: const Color(0xFF0F172A)
-                                        .withOpacity(0.1),
+                                        .withValues(alpha: 0.1),
                                     shape: BoxShape.circle,
                                     image:
                                         avatarUrl != null &&
@@ -232,8 +221,6 @@ class ProfileDrawer extends ConsumerWidget {
                                         )
                                       : null,
                                 ),
-
-                                // LOADING OVERLAY
                                 if (isUploading)
                                   Positioned.fill(
                                     child: Container(
@@ -292,7 +279,60 @@ class ProfileDrawer extends ConsumerWidget {
                       ),
                     ),
 
-                    // ✅ FIXED: Hardcoded strings replaced with exact AppRoutes Constants
+                    // ==========================================
+                    // FINANCE & PAYMENTS SECTION (ADMIN ONLY)
+                    // ==========================================
+                    if (isAdmin) ...[
+                      const Padding(
+                        padding: EdgeInsets.only(left: 8, bottom: 6),
+                        child: Text(
+                          'ФИНАНСЫ И ПЛАТЕЖИ',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.8,
+                            color: Color(0xFF94A3B8),
+                          ),
+                        ),
+                      ),
+                      _MenuItem(
+                        icon: LucideIcons.receipt_text,
+                        iconColor: const Color(0xFF0F766E),
+                        title: 'История платежей и транзакций',
+                        subtitle: 'Реестр T-Bank, возвраты и статусы',
+                        onTap: () {
+                          Navigator.pop(context);
+                          context.push('${AppRoutes.finance}?tab=0');
+                        },
+                      ),
+                      _MenuItem(
+                        icon: LucideIcons.landmark,
+                        iconColor: const Color(0xFFD97706),
+                        title: 'Управление финансами',
+                        subtitle: 'График выплат, комиссия и Kill Switch',
+                        onTap: () {
+                          Navigator.pop(context);
+                          context.push('${AppRoutes.finance}?tab=1');
+                        },
+                      ),
+                      const Divider(height: 28, color: Color(0xFFF1F5F9)),
+                    ],
+
+                    // ==========================================
+                    // GENERAL MANAGEMENT SECTION
+                    // ==========================================
+                    const Padding(
+                      padding: EdgeInsets.only(left: 8, bottom: 6),
+                      child: Text(
+                        'УПРАВЛЕНИЕ',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.8,
+                          color: Color(0xFF94A3B8),
+                        ),
+                      ),
+                    ),
                     _MenuItem(
                       icon: LucideIcons.user_pen,
                       title: 'Редактировать профиль',
@@ -320,16 +360,6 @@ class ProfileDrawer extends ConsumerWidget {
                         context.push(AppRoutes.categories);
                       },
                     ),
-                    _MenuItem(
-                      icon: LucideIcons.message_square_text,
-                      title: 'Поддержка',
-                      subtitle: 'История обращений и билеты',
-                      iconColor: const Color(0xFFF59E0B),
-                      onTap: () {
-                        Navigator.pop(context);
-                        context.push(AppRoutes.support);
-                      },
-                    ),
 
                     const Divider(height: 32, color: Color(0xFFF1F5F9)),
                     _MenuItem(
@@ -339,8 +369,8 @@ class ProfileDrawer extends ConsumerWidget {
                       iconColor: Colors.red,
                       isDestructive: true,
                       onTap: () {
-                        ref.read(authControllerProvider).logout(context);
                         Navigator.pop(context);
+                        ref.read(authControllerProvider).logout(context);
                       },
                     ),
                   ],
@@ -373,6 +403,8 @@ class _MenuItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final Color effectiveColor = isDestructive ? Colors.red : iconColor;
+
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(16),
@@ -383,16 +415,12 @@ class _MenuItem extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: (isDestructive ? Colors.red : Colors.grey).withOpacity(
-                  0.1,
+                color: (isDestructive ? Colors.red : iconColor).withValues(
+                  alpha: 0.1,
                 ),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: Icon(
-                icon,
-                color: isDestructive ? Colors.red : iconColor,
-                size: 22,
-              ),
+              child: Icon(icon, color: effectiveColor, size: 22),
             ),
             const SizedBox(width: 16),
             Expanded(
@@ -416,6 +444,12 @@ class _MenuItem extends StatelessWidget {
                 ],
               ),
             ),
+            if (!isDestructive)
+              const Icon(
+                LucideIcons.chevron_right,
+                size: 18,
+                color: Color(0xFFCBD5E1),
+              ),
           ],
         ),
       ),

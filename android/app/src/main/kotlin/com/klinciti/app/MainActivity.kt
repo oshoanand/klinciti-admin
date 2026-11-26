@@ -1,4 +1,4 @@
-package com.klincitiadmin.app
+package com.klinciti.admin
 
 import io.flutter.embedding.android.FlutterActivity
 

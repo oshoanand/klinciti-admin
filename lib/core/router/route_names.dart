@@ -1,4 +1,6 @@
 class AppRoutes {
+  AppRoutes._();
+
   // Auth
   static const String login = '/login';
 
@@ -15,6 +17,9 @@ class AppRoutes {
   static const String jobsList = '/jobs/list';
   static const String jobDetail = '/job';
   static const String jobsDetail = '/jobs/detail';
+
+  // Finance Routes
+  static const String finance = '/finance';
 
   // Chat Routes
   static const String chatDetail = '/chat';
@@ -39,4 +44,23 @@ class AppRoutes {
 
   // Category Routes
   static const String categories = '/categories';
+
+  // ==========================================
+  // TYPED PATH BUILDERS (Safe Deep-Link Helpers)
+  // ==========================================
+  static String jobDetailPath(String jobId) => '$jobDetail/$jobId';
+
+  static String workerDetailPath(String workerId) => '$workerDetail/$workerId';
+
+  static String customerDetailPath(String customerId) =>
+      '$customerDetail/$customerId';
+
+  static String staffDetailPath(String staffId) => '$staffDetail/$staffId';
+
+  static String chatDetailPath(String sessionId, {String? partnerId}) {
+    if (partnerId != null && partnerId.isNotEmpty) {
+      return '$chatDetail/$sessionId/$partnerId';
+    }
+    return '$chatDetail/$sessionId';
+  }
 }

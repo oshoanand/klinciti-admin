@@ -168,7 +168,7 @@ class NotificationsScreen extends ConsumerWidget {
                         notif.data?['sessionId'] != null) {
                       context.push('/chat-detail/${notif.data!['sessionId']}');
                     } else if (notifType == 'JOB') {
-                      context.push('/orders');
+                      context.push('/dashboard');
                     }
                   },
                   child: Container(

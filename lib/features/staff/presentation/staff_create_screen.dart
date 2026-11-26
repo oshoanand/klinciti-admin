@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/network/api_client.dart';
 import '../../../core/network/api_exceptions.dart';
-import '../providers/staff_list_provider.dart';
+import '../providers/staff_provider.dart';
 
 class StaffCreateScreen extends ConsumerStatefulWidget {
   const StaffCreateScreen({super.key});
@@ -26,8 +26,23 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
   String _email = '';
   String _mobile = '';
   String _password = '';
-  String _role = 'SUPPORT';
-  final String _accessLevel = 'BASIC'; // Adjust based on your DB defaults
+  String _role = 'ADMINISTRATOR';
+  String _accessLevel = 'BASIC';
+
+  String _normalizePhone(String rawInput) {
+    final digits = rawInput.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) return '';
+    if (digits.startsWith('7') && digits.length == 11) {
+      return '+$digits';
+    }
+    if (digits.startsWith('8') && digits.length == 11) {
+      return '+7${digits.substring(1)}';
+    }
+    if (digits.length == 10) {
+      return '+7$digits';
+    }
+    return '+7$digits';
+  }
 
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
@@ -38,12 +53,12 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
     try {
       final api = ref.read(apiClientProvider);
 
-      final payload = {
+      final payload = <String, dynamic>{
         'firstName': _firstName,
         'lastName': _lastName,
-        'middleName': _middleName,
+        if (_middleName.isNotEmpty) 'middleName': _middleName,
         'email': _email,
-        'mobile': _mobile,
+        if (_mobile.isNotEmpty) 'mobile': _mobile,
         'password': _password,
         'role': _role,
         'accessLevel': _accessLevel,
@@ -51,8 +66,8 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
 
       await api.dio.post('/users/staff', data: payload);
 
-      // Refresh list to show new staff
-      ref.invalidate(staffListProvider('ALL'));
+      // Invalidate all role filters ('ALL', 'ADMINISTRATOR', 'SUPPORT')
+      ref.invalidate(staffListProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -61,13 +76,13 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
             backgroundColor: Colors.green,
           ),
         );
-        context.pop(); // Go back to list
+        context.pop();
       }
     } catch (e) {
       if (mounted) {
         final message = e is ApiException
             ? e.message
-            : 'Ошибка при создании сотрудника';
+            : ApiException.fromDioException(e).message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(message), backgroundColor: Colors.red),
         );
@@ -83,6 +98,7 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
       backgroundColor: Colors.white,
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(LucideIcons.arrow_left, color: Color(0xFF0F172A)),
@@ -108,21 +124,23 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
             const SizedBox(height: 16),
             TextFormField(
               decoration: const InputDecoration(
-                labelText: 'Фамилия',
+                labelText: 'Фамилия *',
                 border: OutlineInputBorder(),
               ),
-              validator: (val) =>
-                  val == null || val.isEmpty ? 'Обязательное поле' : null,
+              validator: (val) => val == null || val.trim().isEmpty
+                  ? 'Обязательное поле'
+                  : null,
               onSaved: (val) => _lastName = val!.trim(),
             ),
             const SizedBox(height: 16),
             TextFormField(
               decoration: const InputDecoration(
-                labelText: 'Имя',
+                labelText: 'Имя *',
                 border: OutlineInputBorder(),
               ),
-              validator: (val) =>
-                  val == null || val.isEmpty ? 'Обязательное поле' : null,
+              validator: (val) => val == null || val.trim().isEmpty
+                  ? 'Обязательное поле'
+                  : null,
               onSaved: (val) => _firstName = val!.trim(),
             ),
             const SizedBox(height: 16),
@@ -136,53 +154,91 @@ class _StaffCreateScreenState extends ConsumerState<StaffCreateScreen> {
             const SizedBox(height: 24),
 
             const Text(
-              'Контакты и доступ',
+              'Контакты и права доступа',
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey),
             ),
             const SizedBox(height: 16),
             TextFormField(
               decoration: const InputDecoration(
-                labelText: 'Email',
+                labelText: 'Email *',
                 border: OutlineInputBorder(),
               ),
               keyboardType: TextInputType.emailAddress,
-              validator: (val) => val == null || !val.contains('@')
+              validator: (val) =>
+                  val == null || !val.contains('@') || !val.contains('.')
                   ? 'Введите корректный email'
                   : null,
-              onSaved: (val) => _email = val!.trim(),
+              onSaved: (val) => _email = val!.trim().toLowerCase(),
             ),
             const SizedBox(height: 16),
             TextFormField(
               decoration: const InputDecoration(
                 labelText: 'Телефон',
+                hintText: '999 123-45-67',
                 border: OutlineInputBorder(),
                 prefixText: '+7 ',
               ),
               keyboardType: TextInputType.phone,
-              onSaved: (val) => _mobile =
-                  '+7${val!.trim()}', // Format to match your DB expectations
+              validator: (val) {
+                if (val == null || val.trim().isEmpty) return null;
+                final digits = val.replaceAll(RegExp(r'\D'), '');
+                if (digits.length < 10) {
+                  return 'Введите корректный номер телефона';
+                }
+                return null;
+              },
+              onSaved: (val) => _mobile = _normalizePhone(val ?? ''),
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: _role,
+              initialValue: _role,
               decoration: const InputDecoration(
-                labelText: 'Роль',
+                labelText: 'Роль сотрудника',
                 border: OutlineInputBorder(),
               ),
               items: const [
-                DropdownMenuItem(value: 'SUPPORT', child: Text('Поддержка')),
+                DropdownMenuItem(
+                  value: 'SUPPORT',
+                  child: Text('Поддержка (SUPPORT)'),
+                ),
                 DropdownMenuItem(
                   value: 'ADMINISTRATOR',
-                  child: Text('Администратор'),
+                  child: Text('Администратор (ADMINISTRATOR)'),
                 ),
-                DropdownMenuItem(value: 'WORKER', child: Text('Исполнитель')),
               ],
-              onChanged: (val) => setState(() => _role = val!),
+              onChanged: (val) {
+                if (val != null) {
+                  setState(() {
+                    _role = val;
+                    if (_role == 'ADMINISTRATOR') {
+                      _accessLevel = 'FULL';
+                    }
+                  });
+                }
+              },
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              initialValue: _accessLevel,
+              decoration: const InputDecoration(
+                labelText: 'Уровень доступа',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'BASIC',
+                  child: Text('Базовый (BASIC)'),
+                ),
+                DropdownMenuItem(value: 'FULL', child: Text('Полный (FULL)')),
+              ],
+              onChanged: (val) {
+                if (val != null) setState(() => _accessLevel = val);
+              },
             ),
             const SizedBox(height: 16),
             TextFormField(
               decoration: InputDecoration(
-                labelText: 'Пароль для входа',
+                labelText: 'Пароль для входа *',
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: Icon(

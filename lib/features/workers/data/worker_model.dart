@@ -42,7 +42,10 @@ class WorkerModel {
   final String moderationStatus;
   final String? rejectionReason;
 
-  // Step 2: Location, Experience, Bio & Vehicle
+  // Step 2: Legal & Professional Profile
+  final String? legalType; // 'SELF_EMPLOYED', 'IP', 'OOO'
+  final String? inn;
+  final String? companyName;
   final String? city;
   final String? address;
   final String? experience;
@@ -61,9 +64,13 @@ class WorkerModel {
   final String? selfieWithIdUrl;
   final String? driversLicenseUrl;
 
-  // Step 4: Financial Info
-  final String? taxId;
-  final String? payoutDetails;
+  // Step 4: Banking & Financial Details
+  final String? bankName;
+  final String? bankBik;
+  final String? checkingAccount;
+  final String? correspondentAccount;
+  final String? taxId; // Legacy fallback
+  final String? payoutDetails; // Legacy fallback
 
   // Stats & Timestamps
   final double rating;
@@ -83,6 +90,9 @@ class WorkerModel {
     required this.authStatus,
     required this.moderationStatus,
     this.rejectionReason,
+    this.legalType,
+    this.inn,
+    this.companyName,
     this.city,
     this.address,
     this.experience,
@@ -98,6 +108,10 @@ class WorkerModel {
     this.idDocumentBackUrl,
     this.selfieWithIdUrl,
     this.driversLicenseUrl,
+    this.bankName,
+    this.bankBik,
+    this.checkingAccount,
+    this.correspondentAccount,
     this.taxId,
     this.payoutDetails,
     this.rating = 5.0,
@@ -164,7 +178,7 @@ class WorkerModel {
       id: (json['id'] ?? json['user_id'] ?? '').toString(),
       name: rawName.isNotEmpty
           ? rawName
-          : (fallbackName.isNotEmpty ? fallbackName : 'Без имени'),
+          : (fallbackName.isNotEmpty ? fallbackName : 'No name'),
       firstName: firstName,
       middleName: middleName,
       lastName: lastName,
@@ -180,6 +194,10 @@ class WorkerModel {
       rejectionReason: (json['rejection_reason'] ?? json['rejectionReason'])
           ?.toString(),
 
+      // Legal & Professional Fields
+      legalType: (json['legal_type'] ?? json['legalType'])?.toString(),
+      inn: json['inn']?.toString(),
+      companyName: (json['company_name'] ?? json['companyName'])?.toString(),
       city: json['city']?.toString(),
       address: json['address']?.toString(),
       experience: parsedExperience,
@@ -190,6 +208,7 @@ class WorkerModel {
           ?.toString(),
       categories: parsedCategories,
 
+      // KYC & Identity
       dateOfBirth: (json['date_of_birth'] ?? json['dateOfBirth']) != null
           ? DateTime.tryParse(
               (json['date_of_birth'] ?? json['dateOfBirth']).toString(),
@@ -210,10 +229,18 @@ class WorkerModel {
           (json['drivers_license_url'] ?? json['driversLicenseUrl'])
               ?.toString(),
 
-      taxId: (json['tax_id'] ?? json['taxId'])?.toString(),
-      payoutDetails: (json['payout_details'] ?? json['payoutDetails'])
+      // Banking & Financial
+      bankName: (json['bank_name'] ?? json['bankName'])?.toString(),
+      bankBik: (json['bank_bik'] ?? json['bankBik'])?.toString(),
+      checkingAccount: (json['checking_account'] ?? json['checkingAccount'])
           ?.toString(),
-
+      correspondentAccount:
+          (json['correspondent_account'] ?? json['correspondentAccount'])
+              ?.toString(),
+      taxId: (json['tax_id'] ?? json['taxId'])?.toString(), // Legacy
+      payoutDetails: (json['payout_details'] ?? json['payoutDetails'])
+          ?.toString(), // Legacy
+      // Stats
       rating: double.tryParse((json['rating'] ?? '5.0').toString()) ?? 5.0,
       totalJobsCompleted:
           int.tryParse(

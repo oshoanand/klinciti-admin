@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.klincitiadmin.app"
+    namespace = "com.klinciti.admin"
     // ✅ CHANGED: Hardcoded to 36 to fix the flutter_ringtone_player error
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
@@ -18,7 +18,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.klincitiadmin.app"
+        applicationId = "com.klinciti.admin"
         minSdk = flutter.minSdkVersion 
         // ✅ CHANGED: Hardcoded to 36 to match compileSdk
         targetSdk = 36

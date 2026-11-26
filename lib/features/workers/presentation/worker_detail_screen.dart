@@ -53,9 +53,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Невозможно открыть набор номера на этом устройстве'),
-          ),
+          const SnackBar(content: Text('Unable to open dialer on this device')),
         );
       }
     }
@@ -74,7 +72,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
         final msg = ApiException.fromDioException(e).message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Ошибка создания чата: $msg'),
+            content: Text('Error creating chat: $msg'),
             backgroundColor: Colors.red,
           ),
         );
@@ -118,7 +116,6 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
 
       ref.invalidate(workerDetailProvider(widget.workerId));
       ref.invalidate(workerStatsProvider);
-      ref.invalidate(workersListProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -162,7 +159,6 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
 
       ref.invalidate(workerDetailProvider(widget.workerId));
       ref.invalidate(workerStatsProvider);
-      ref.invalidate(workersListProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -370,7 +366,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
                 const SizedBox(height: 8),
                 _buildPersonalDetailsCard(worker),
 
-                // 5. STEP 2: PROFESSIONAL INFO, EXPERIENCE, BIO & CATEGORIES
+                // 5. STEP 2: LEGAL & PROFESSIONAL INFO
                 const SizedBox(height: 24),
                 _buildSectionHeader(
                   icon: LucideIcons.briefcase,
@@ -401,7 +397,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
                 const SizedBox(height: 24),
                 _buildSectionHeader(
                   icon: LucideIcons.landmark,
-                  title: 'Налоговые и платежные реквизиты (Шаг 4)',
+                  title: 'Банковские реквизиты (Шаг 4)',
                 ),
                 const SizedBox(height: 8),
                 _buildFinancialCard(worker),
@@ -732,6 +728,19 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
     );
   }
 
+  String _getLegalTypeText(String? type) {
+    switch (type?.toUpperCase()) {
+      case 'IP':
+        return 'ИП (Индивидуальный предприниматель)';
+      case 'OOO':
+        return 'ООО (Юр. лицо)';
+      case 'SELF_EMPLOYED':
+        return 'Самозанятый (НПД)';
+      default:
+        return 'Не указан';
+    }
+  }
+
   Widget _buildProfessionalCard(WorkerModel worker) {
     final hasExperience =
         worker.experience != null && worker.experience!.trim().isNotEmpty;
@@ -740,6 +749,23 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
 
     return _buildInfoContainer(
       children: [
+        // 1. Legal Type and Details
+        _buildInfoRow('Форма занятости', _getLegalTypeText(worker.legalType)),
+        const Divider(height: 20),
+        _buildInfoRow(
+          'ИНН',
+          worker.inn ?? 'Не указан',
+          onCopy: worker.inn != null
+              ? () => _copyToClipboard(worker.inn!, 'ИНН')
+              : null,
+        ),
+        if (worker.companyName != null && worker.companyName!.isNotEmpty) ...[
+          const Divider(height: 20),
+          _buildInfoRow('Наименование', worker.companyName!),
+        ],
+        const Divider(height: 20),
+
+        // 2. Geography & Bio
         _buildInfoRow('Город', worker.city ?? 'Не указан'),
         const Divider(height: 20),
         _buildInfoRow('Адрес проживания', worker.address ?? 'Не указан'),
@@ -917,7 +943,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             const Text(
-              'Загруженные фотографии документов:',
+              'документов:',
               style: TextStyle(
                 fontSize: 13.5,
                 fontWeight: FontWeight.w600,
@@ -1098,6 +1124,49 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
   }
 
   Widget _buildFinancialCard(WorkerModel worker) {
+    // If the worker has the new banking fields populated
+    final hasNewBanking =
+        worker.checkingAccount != null && worker.checkingAccount!.isNotEmpty;
+
+    if (hasNewBanking) {
+      return _buildInfoContainer(
+        children: [
+          _buildInfoRow('Название банка', worker.bankName ?? 'Не указано'),
+          const Divider(height: 20),
+          _buildInfoRow(
+            'БИК банка',
+            worker.bankBik ?? 'Не указан',
+            onCopy: worker.bankBik != null
+                ? () => _copyToClipboard(worker.bankBik!, 'БИК')
+                : null,
+          ),
+          const Divider(height: 20),
+          _buildInfoRow(
+            'Расчетный счет',
+            worker.checkingAccount ?? 'Не указан',
+            onCopy: worker.checkingAccount != null
+                ? () => _copyToClipboard(
+                    worker.checkingAccount!,
+                    'Расчетный счет',
+                  )
+                : null,
+          ),
+          const Divider(height: 20),
+          _buildInfoRow(
+            'Корр. счет',
+            worker.correspondentAccount ?? 'Не указан',
+            onCopy: worker.correspondentAccount != null
+                ? () => _copyToClipboard(
+                    worker.correspondentAccount!,
+                    'Корр. счет',
+                  )
+                : null,
+          ),
+        ],
+      );
+    }
+
+    // Legacy fallback rendering
     final hasTaxId = worker.taxId != null && worker.taxId!.trim().isNotEmpty;
     final hasPayout =
         worker.payoutDetails != null && worker.payoutDetails!.trim().isNotEmpty;
@@ -1134,12 +1203,14 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
       children: [
         Icon(icon, size: 18, color: const Color(0xFF0F172A)),
         const SizedBox(width: 8),
-        Text(
-          title,
-          style: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.bold,
-            color: Color(0xFF0F172A),
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF0F172A),
+            ),
           ),
         ),
       ],

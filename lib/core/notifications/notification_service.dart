@@ -1,32 +1,39 @@
-import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer';
+import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../network/api_client.dart';
 import '../router/app_router.dart';
+import '../router/route_names.dart';
 import '../socket/socket_service.dart';
-import '../../core/router/route_names.dart';
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  log('Background FCM received: ${message.messageId}');
+  log('Background Admin FCM received: ${message.messageId}');
 }
 
 final notificationServiceProvider = Provider<NotificationService>((ref) {
-  return NotificationService(
+  final service = NotificationService(
     ref.watch(apiClientProvider),
     rootNavigatorKey,
     ref.watch(socketServiceProvider),
   );
+  ref.onDispose(service.dispose);
+  return service;
 });
 
 class NotificationService {
+  static const String _androidChannelId = 'klinciti_high_priority';
+  static const Duration _dedupeWindow = Duration(seconds: 60);
+
   final FirebaseMessaging _fcm = FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _localPlugin =
       FlutterLocalNotificationsPlugin();
@@ -35,66 +42,151 @@ class NotificationService {
   final GlobalKey<NavigatorState> _navigatorKey;
   final SocketService _socketService;
 
-  // Prevents duplicate notifications if BOTH Socket and FCM deliver the same message
-  final Set<String> _recentNotificationIds = {};
+  final Map<String, DateTime> _recentNotificationIds = {};
+
+  StreamSubscription<String>? _tokenRefreshSub;
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
+
+  bool _isInitialized = false;
+  bool _isLocalPluginReady = false;
 
   NotificationService(this._apiClient, this._navigatorKey, this._socketService);
 
+  void dispose() {
+    _socketService.stopListening('notification', _handleSocketMessage);
+    _tokenRefreshSub?.cancel();
+    _onMessageSub?.cancel();
+    _onMessageOpenedSub?.cancel();
+  }
+
   Future<void> initialize() async {
+    if (_isInitialized) return;
+    _isInitialized = true;
+
+    await _initLocalNotifications();
+    _socketService.listen('notification', _handleSocketMessage);
+
     final settings = await _fcm.requestPermission(
       alert: true,
       badge: true,
       sound: true,
-      provisional: true, // Allows silent fallback if user denies full popup
+      provisional: true,
     );
 
-    // Accept both authorized and provisional states
     if (settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional) {
-      // CREATE THE BRAND NEW HIGH PRIORITY CHANNEL
-      const AndroidNotificationChannel channel = AndroidNotificationChannel(
-        'klinciti_high_priority',
-        'Важные уведомления',
-        description: 'Уведомления о заказах и сообщениях',
-        importance: Importance.max,
-        enableVibration: true,
-        playSound: true,
-      );
-
-      await _localPlugin
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >()
-          ?.createNotificationChannel(channel);
-
-      const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
-      const iosInit = DarwinInitializationSettings();
-
-      await _localPlugin.initialize(
-        const InitializationSettings(android: androidInit, iOS: iosInit),
-        onDidReceiveNotificationResponse: _onSelectNotification,
-      );
+      if (!kIsWeb && Platform.isIOS) {
+        await _fcm.setForegroundNotificationPresentationOptions(
+          alert: false,
+          badge: true,
+          sound: false,
+        );
+      }
 
       final token = await _fcm.getToken();
-      if (token != null) await _registerDeviceToken(token);
-      _fcm.onTokenRefresh.listen(_registerDeviceToken);
+      if (token != null && token.isNotEmpty) {
+        await _registerDeviceToken(token);
+      }
 
-      FirebaseMessaging.onMessage.listen(_handleFcmForegroundMessage);
-      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-      FirebaseMessaging.onMessageOpenedApp.listen(
+      _tokenRefreshSub = _fcm.onTokenRefresh.listen(
+        (newToken) => unawaited(_registerDeviceToken(newToken)),
+      );
+
+      _onMessageSub = FirebaseMessaging.onMessage.listen(
+        _handleFcmForegroundMessage,
+      );
+
+      _onMessageOpenedSub = FirebaseMessaging.onMessageOpenedApp.listen(
         (msg) => _routeFromData(msg.data),
       );
 
-      final initialMessage = await FirebaseMessaging.instance
-          .getInitialMessage();
+      final initialMessage = await _fcm.getInitialMessage();
       if (initialMessage != null) {
         Future.delayed(
           const Duration(milliseconds: 500),
           () => _routeFromData(initialMessage.data),
         );
       }
+    }
+  }
 
-      _socketService.listen('notification', _handleSocketMessage);
+  Future<void> _initLocalNotifications() async {
+    if (_isLocalPluginReady) return;
+
+    const AndroidNotificationChannel channel = AndroidNotificationChannel(
+      _androidChannelId,
+      'Системные уведомления Admin',
+      description: 'Новые заявки, споры, модерация и финансовые оповещения',
+      importance: Importance.max,
+      enableVibration: true,
+      playSound: true,
+    );
+
+    await _localPlugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >()
+        ?.createNotificationChannel(channel);
+
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const iosInit = DarwinInitializationSettings();
+
+    await _localPlugin.initialize(
+      const InitializationSettings(android: androidInit, iOS: iosInit),
+      onDidReceiveNotificationResponse: _onSelectNotification,
+    );
+
+    _isLocalPluginReady = true;
+  }
+
+  /// Binds this device token to the Admin user; backend Redis Stream consumer
+  /// automatically subscribes it to `admin_alerts` and `user_<mobile>`.
+  Future<void> registerTokenAfterLogin() async {
+    try {
+      final fcmToken = await _fcm.getToken();
+      if (fcmToken != null && fcmToken.isNotEmpty) {
+        await _registerDeviceToken(fcmToken, forceRegister: true);
+      }
+    } catch (e) {
+      log('❌ Failed to register Admin FCM token: $e');
+    }
+  }
+
+  /// Call BEFORE deleting `jwt_token` on logout so the backend removes the token
+  /// and unsubscribes it from `admin_alerts` and `user_<mobile>`.
+  Future<void> unregisterTokenOnLogout() async {
+    try {
+      final fcmToken = await _fcm.getToken();
+      await _apiClient.dio.post(
+        '/fcm/remove-fcm',
+        data: {
+          if (fcmToken != null && fcmToken.isNotEmpty) 'fcmToken': fcmToken,
+        },
+      );
+      _recentNotificationIds.clear();
+      log('✅ Admin FCM token unregistered on logout');
+    } catch (e) {
+      log('⚠️ Failed to unregister Admin FCM token: $e');
+    }
+  }
+
+  Future<void> _registerDeviceToken(
+    String fcmToken, {
+    bool forceRegister = false,
+  }) async {
+    try {
+      final token = await _apiClient.storage.read(key: 'jwt_token');
+      if (!forceRegister && (token == null || token.isEmpty)) return;
+
+      final String deviceType = (!kIsWeb && Platform.isIOS) ? 'IOS' : 'ANDROID';
+      await _apiClient.dio.post(
+        '/fcm/save-fcm',
+        data: {'fcmToken': fcmToken, 'deviceType': deviceType},
+      );
+      log('✅ Admin FCM Token registered ($deviceType)');
+    } catch (e) {
+      log('❌ Admin FCM Token registration failed: $e');
     }
   }
 
@@ -102,53 +194,32 @@ class NotificationService {
     required String id,
     required String title,
     required String body,
-    required Map<dynamic, dynamic> payloadData,
+    required Map<String, dynamic> payloadData,
   }) {
-    if (_recentNotificationIds.contains(id)) return;
-    _recentNotificationIds.add(id);
-    if (_recentNotificationIds.length > 50) _recentNotificationIds.clear();
+    if (!_isLocalPluginReady) return;
 
-    final context = _navigatorKey.currentContext;
-    if (context != null) {
-      try {
-        // Ask the router delegate directly for the current URI
-        final router = GoRouter.of(context);
-        final currentRoute = router.routerDelegate.currentConfiguration.uri
-            .toString();
+    final now = DateTime.now();
+    _recentNotificationIds.removeWhere(
+      (_, timestamp) => now.difference(timestamp) > _dedupeWindow,
+    );
+    if (_recentNotificationIds.containsKey(id)) return;
+    _recentNotificationIds[id] = now;
 
-        final type = payloadData['type']?.toString().toUpperCase() ?? '';
-
-        // ✅ FIXED: Correctly check the active chat route to suppress the local banner
-        if ((type == 'CHAT' || type == 'CHAT_FCM') &&
-            payloadData['sessionId'] != null) {
-          final targetSessionId = payloadData['sessionId'];
-
-          if (currentRoute.contains('/chat/$targetSessionId')) {
-            return; // Suppress OS banner only if user is actively in this exact chat
-          }
-        }
-      } catch (e) {
-        log(
-          '⚠️ Route check failed, proceeding to show notification anyway: $e',
-        );
-      }
-    }
-
-    // Safely encode JSON to prevent crashes
     String stringifiedPayload = '{}';
     try {
       stringifiedPayload = jsonEncode(payloadData);
     } catch (_) {}
 
     _localPlugin.show(
-      id.hashCode,
+      id.hashCode & 0x7FFFFFFF,
       title,
       body,
       const NotificationDetails(
         android: AndroidNotificationDetails(
-          'klinciti_high_priority', // Must match the channel in AndroidManifest
-          'Важные уведомления',
-          channelDescription: 'Уведомления о заказах и сообщениях',
+          _androidChannelId,
+          'Системные уведомления Admin',
+          channelDescription:
+              'Новые заявки, споры, модерация и финансовые оповещения',
           importance: Importance.max,
           priority: Priority.high,
           enableVibration: true,
@@ -164,141 +235,119 @@ class NotificationService {
     );
   }
 
-  // ==============================================================
-  // AUTH BRIDGES
-  // ==============================================================
-
-  Future<void> registerTokenAfterLogin() async {
-    try {
-      final fcmToken = await _fcm.getToken();
-      if (fcmToken != null) {
-        await _registerDeviceToken(fcmToken, forceRegister: true);
-      }
-    } catch (e) {
-      log('Failed to register token after login: $e');
-    }
-  }
-
-  Future<void> subscribeToUserTopics(String? mobile) async {
-    try {
-      await _fcm.subscribeToTopic('kilinciti_admins_topic');
-      if (mobile != null && mobile.isNotEmpty) {
-        final String digits = mobile.replaceAll(RegExp(r'\D'), '');
-        String userTopic = '';
-        if (digits.length == 11 &&
-            (digits.startsWith('7') || digits.startsWith('8'))) {
-          userTopic = 'user_${digits.substring(1)}';
-        } else if (digits.isNotEmpty) {
-          userTopic = 'user_$digits';
-        }
-        if (userTopic.isNotEmpty) await _fcm.subscribeToTopic(userTopic);
-      }
-    } catch (e) {
-      log('❌ Failed to subscribe to topics: $e');
-    }
-  }
-
-  Future<void> unsubscribeFromTopics(String? mobile) async {
-    try {
-      await _fcm.unsubscribeFromTopic('kilinciti_admins_topic');
-      if (mobile != null && mobile.isNotEmpty) {
-        final String digits = mobile.replaceAll(RegExp(r'\D'), '');
-        String userTopic = '';
-        if (digits.length == 11 &&
-            (digits.startsWith('7') || digits.startsWith('8'))) {
-          userTopic = 'user_${digits.substring(1)}';
-        } else if (digits.isNotEmpty) {
-          userTopic = 'user_$digits';
-        }
-        if (userTopic.isNotEmpty) await _fcm.unsubscribeFromTopic(userTopic);
-      }
-    } catch (e) {}
-  }
-
-  // ==============================================================
-  // INTERNAL HELPERS
-  // ==============================================================
-
-  Future<void> _registerDeviceToken(
-    String fcmToken, {
-    bool forceRegister = false,
-  }) async {
-    try {
-      final token = await _apiClient.storage.read(key: 'jwt_token');
-      if (!forceRegister && (token == null || token.isEmpty)) return;
-
-      String deviceType = Platform.isIOS ? 'IOS' : 'ANDROID';
-      await _apiClient.dio.post(
-        '/fcm/save-fcm',
-        data: {'fcmToken': fcmToken, 'deviceType': deviceType},
-      );
-      log('✅ FCM Token registered ($deviceType)');
-    } catch (e) {
-      log('❌ FCM Token registration failed.');
-    }
-  }
-
   void _handleFcmForegroundMessage(RemoteMessage message) {
-    if (message.notification != null) {
-      _processIncomingNotification(
-        id: message.messageId ?? DateTime.now().toString(),
-        title: message.notification!.title ?? 'Уведомление',
-        body: message.notification!.body ?? '',
-        payloadData: message.data,
-      );
+    final data = Map<String, dynamic>.from(message.data);
+    final title = message.notification?.title ?? data['title']?.toString();
+    final body = message.notification?.body ?? data['body']?.toString();
+    if ((title == null || title.isEmpty) && (body == null || body.isEmpty)) {
+      return;
     }
+
+    final sharedId =
+        data['notificationId']?.toString() ??
+        data['id']?.toString() ??
+        message.messageId ??
+        DateTime.now().millisecondsSinceEpoch.toString();
+
+    _processIncomingNotification(
+      id: sharedId,
+      title: title ?? 'Системное уведомление',
+      body: body ?? '',
+      payloadData: data,
+    );
   }
 
   void _handleSocketMessage(dynamic payload) {
     try {
       final Map<String, dynamic> data = payload is String
-          ? Map<String, dynamic>.from(jsonDecode(payload))
+          ? Map<String, dynamic>.from(jsonDecode(payload) as Map)
           : Map<String, dynamic>.from(payload as Map);
 
-      final String uniqueId =
-          data['id']?.toString() ?? DateTime.now().toString();
+      Map<String, dynamic> nestedData = {};
+      if (data['data'] is Map) {
+        nestedData = Map<String, dynamic>.from(data['data'] as Map);
+      }
 
-      // Safely parse nested data
-      final Map<dynamic, dynamic> rawData = data['data'] is Map
-          ? data['data']
-          : {};
-      final String title = data['title'] ?? rawData['title'] ?? 'Уведомление';
-      final String body = data['body'] ?? data['message'] ?? '';
+      final Map<String, dynamic> mergedPayload = {
+        if (data['notificationId'] != null)
+          'notificationId': data['notificationId'],
+        if (data['type'] != null) 'type': data['type'],
+        if (data['sessionId'] != null) 'sessionId': data['sessionId'],
+        if (data['jobId'] != null) 'jobId': data['jobId'],
+        if (data['workerId'] != null) 'workerId': data['workerId'],
+        if (data['paymentId'] != null) 'paymentId': data['paymentId'],
+        ...nestedData,
+      };
+
+      final uniqueId =
+          mergedPayload['notificationId']?.toString() ??
+          data['notificationId']?.toString() ??
+          data['id']?.toString() ??
+          DateTime.now().millisecondsSinceEpoch.toString();
 
       _processIncomingNotification(
         id: uniqueId,
-        title: title,
-        body: body,
-        payloadData: rawData,
+        title:
+            data['title']?.toString() ??
+            mergedPayload['title']?.toString() ??
+            'Системное уведомление',
+        body:
+            data['body']?.toString() ??
+            data['message']?.toString() ??
+            mergedPayload['body']?.toString() ??
+            '',
+        payloadData: mergedPayload,
       );
     } catch (e) {
-      log('❌ Socket Payload Parse Error: $e');
+      log('❌ Admin Socket Payload Parse Error: $e');
     }
   }
 
   void _onSelectNotification(NotificationResponse response) {
-    if (response.payload != null) _routeFromData(jsonDecode(response.payload!));
+    final rawPayload = response.payload;
+    if (rawPayload != null && rawPayload.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawPayload);
+        if (decoded is Map) {
+          _routeFromData(Map<String, dynamic>.from(decoded));
+        }
+      } catch (e) {
+        log('❌ Admin notification tap decode error: $e');
+      }
+    }
   }
 
+  // ==============================================================
+  // ADMIN DEEP-LINK ROUTER
+  // ==============================================================
   void _routeFromData(Map<String, dynamic> data) {
     final context = _navigatorKey.currentContext;
     if (context == null) return;
 
-    final type = data['type']?.toString().toUpperCase();
+    final type = data['type']?.toString().toUpperCase() ?? '';
+    final sessionId = data['sessionId']?.toString();
+    final jobId = data['jobId']?.toString();
+    final workerId = data['workerId']?.toString();
 
-    if (type == 'CHAT_FCM' || type == 'CHAT') {
-      final sessionId = data['sessionId'] ?? data['chatId'];
-      final partnerId = data['partnerId'];
-
-      if (sessionId != null && partnerId != null) {
-        context.go('${AppRoutes.chatDetail}/$sessionId/$partnerId');
-      } else {
-        context.go(AppRoutes.chatList);
-      }
-    } else if (type == 'JOB') {
-      context.go('${AppRoutes.jobsList}/NEW');
-    } else {
-      context.go(AppRoutes.notifications);
+    if (sessionId != null && sessionId.isNotEmpty) {
+      context.push('${AppRoutes.chatDetail}/$sessionId');
+      return;
     }
+    if (type.contains('PAYOUT') ||
+        type.contains('PAYMENT') ||
+        type.contains('REFUND')) {
+      context.go(AppRoutes.finance);
+      return;
+    }
+    if (workerId != null && workerId.isNotEmpty) {
+      context.push('${AppRoutes.workerDetail}/$workerId');
+      return;
+    }
+    if (jobId != null && jobId.isNotEmpty) {
+      context.push('${AppRoutes.jobDetail}/$jobId');
+      return;
+    }
+
+    context.push(AppRoutes.notifications);
   }
 }

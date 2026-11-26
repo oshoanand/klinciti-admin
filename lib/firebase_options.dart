@@ -54,7 +54,7 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyDyuyT8kbj85UpJLpRSR9728hfo07a2-6k',
-    appId: '1:916775688778:android:ac6360387d48a4b00aa4b3',
+    appId: '1:916775688778:android:c9d8d6d53b7e8d450aa4b3',
     messagingSenderId: '916775688778',
     projectId: 'klinciti-fa821',
     storageBucket: 'klinciti-fa821.firebasestorage.app',

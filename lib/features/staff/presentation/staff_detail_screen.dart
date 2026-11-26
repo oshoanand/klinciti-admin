@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/network/api_exceptions.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/network/api_exceptions.dart';
+import '../../../core/router/route_names.dart';
 import '../../../shared/widgets/global_error_widget.dart';
-import '../providers/staff_detail_provider.dart';
-import '../providers/staff_list_provider.dart';
-import '../data/staff_model.dart';
+import '../../chat/data/chat_repository.dart';
+import '../providers/staff_provider.dart';
 
 class StaffDetailScreen extends ConsumerStatefulWidget {
   final String staffId;
@@ -21,6 +22,93 @@ class StaffDetailScreen extends ConsumerStatefulWidget {
 
 class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
   bool _isUpdating = false;
+  bool _isStartingChat = false;
+
+  Future<void> _makeCall(String? mobile) async {
+    if (mobile == null || mobile.trim().isEmpty) return;
+
+    final cleanNumber = mobile.replaceAll(RegExp(r'[^\d+]'), '');
+    final Uri launchUri = Uri(scheme: 'tel', path: cleanNumber);
+
+    try {
+      await launchUrl(launchUri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Невозможно открыть набор номера на этом устройстве'),
+          ),
+        );
+      }
+    }
+  }
+
+  void _copyToClipboard(String text, String label) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$label скопирован в буфер обмена'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _startChat(String staffId) async {
+    setState(() => _isStartingChat = true);
+    try {
+      final session = await ref
+          .read(chatRepositoryProvider)
+          .initiateChat(staffId);
+      if (mounted) {
+        context.push('${AppRoutes.chatDetail}/${session.id}/$staffId');
+      }
+    } catch (e) {
+      if (mounted) {
+        final msg = e is ApiException
+            ? e.message
+            : ApiException.fromDioException(e).message;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка открытия чата: $msg'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isStartingChat = false);
+    }
+  }
+
+  Future<void> _confirmAndToggleStatus(bool isCurrentlyActive) async {
+    if (isCurrentlyActive) {
+      final bool? confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Заблокировать сотрудника?'),
+          content: const Text(
+            'Заблокированный сотрудник потеряет доступ к панели управления Klinciti до разблокировки.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text(
+                'Заблокировать',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    await _toggleUserStatus(isCurrentlyActive);
+  }
 
   Future<void> _toggleUserStatus(bool currentStatus) async {
     setState(() => _isUpdating = true);
@@ -28,12 +116,12 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
       final api = ref.read(apiClientProvider);
 
       await api.dio.patch(
-        '/users/staff/${widget.staffId}', // Maps to PATCH /staff/:id
+        '/users/staff/${widget.staffId}',
         data: {'authStatus': currentStatus ? 'SUSPENDED' : 'ACTIVE'},
       );
 
       ref.invalidate(staffDetailProvider(widget.staffId));
-      ref.invalidate(staffListProvider('ALL'));
+      ref.invalidate(staffListProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -51,13 +139,24 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
       if (mounted) {
         final message = e is ApiException
             ? e.message
-            : 'Ошибка при обновлении статуса';
+            : ApiException.fromDioException(e).message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(message), backgroundColor: Colors.red),
         );
       }
     } finally {
       if (mounted) setState(() => _isUpdating = false);
+    }
+  }
+
+  String _getTranslatedRole(String role) {
+    switch (role) {
+      case 'ADMINISTRATOR':
+        return 'АДМИНИСТРАТОР';
+      case 'SUPPORT':
+        return 'ПОДДЕРЖКА';
+      default:
+        return role;
     }
   }
 
@@ -69,6 +168,7 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         leading: IconButton(
           icon: const Icon(LucideIcons.arrow_left, color: Color(0xFF0F172A)),
@@ -81,6 +181,18 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
             fontWeight: FontWeight.bold,
           ),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(
+              LucideIcons.refresh_cw,
+              size: 18,
+              color: Color(0xFF0F172A),
+            ),
+            tooltip: 'Обновить',
+            onPressed: () =>
+                ref.invalidate(staffDetailProvider(widget.staffId)),
+          ),
+        ],
       ),
       body: detailAsync.when(
         loading: () => const Center(
@@ -102,30 +214,45 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
               children: [
                 const SizedBox(height: 16),
                 CircleAvatar(
-                  radius: 50,
-                  backgroundColor: const Color(0xFF0F172A).withOpacity(0.05),
-                  child: const Icon(
-                    LucideIcons.user,
+                  radius: 48,
+                  backgroundColor: const Color(0xFF0F172A)
+                      .withValues(alpha: 0.06),
+                  child: Icon(
+                    staff.role == 'ADMINISTRATOR'
+                        ? LucideIcons.shield_check
+                        : LucideIcons.headset,
                     size: 40,
-                    color: Colors.grey,
+                    color: const Color(0xFF0F172A),
                   ),
                 ),
                 const SizedBox(height: 16),
                 Text(
                   staff.name,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
-                    fontSize: 24,
+                    fontSize: 22,
                     fontWeight: FontWeight.bold,
+                    color: Color(0xFF0F172A),
                   ),
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  staff.role,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Colors.blue,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.2,
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.shade50,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    _getTranslatedRole(staff.role),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.blue.shade800,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.8,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -146,16 +273,32 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                           ),
                           title: const Text('Телефон'),
                           subtitle: Text(staff.mobile!),
-                          trailing: IconButton(
-                            icon: const Icon(
-                              LucideIcons.phone_call,
-                              color: Colors.green,
-                            ),
-                            onPressed: () =>
-                                launchUrl(Uri.parse('tel:${staff.mobile}')),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                icon: const Icon(
+                                  LucideIcons.copy,
+                                  size: 18,
+                                  color: Colors.blueGrey,
+                                ),
+                                tooltip: 'Скопировать телефон',
+                                onPressed: () =>
+                                    _copyToClipboard(staff.mobile!, 'Телефон'),
+                              ),
+                              IconButton(
+                                icon: const Icon(
+                                  LucideIcons.phone_call,
+                                  color: Colors.green,
+                                ),
+                                tooltip: 'Позвонить',
+                                onPressed: () => _makeCall(staff.mobile),
+                              ),
+                            ],
                           ),
                         ),
-                      if (staff.email != null && staff.email!.isNotEmpty)
+                      if (staff.email != null && staff.email!.isNotEmpty) ...[
+                        const Divider(height: 1),
                         ListTile(
                           leading: const Icon(
                             LucideIcons.mail,
@@ -163,7 +306,18 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                           ),
                           title: const Text('Email'),
                           subtitle: Text(staff.email!),
+                          trailing: IconButton(
+                            icon: const Icon(
+                              LucideIcons.copy,
+                              size: 18,
+                              color: Colors.blueGrey,
+                            ),
+                            tooltip: 'Скопировать Email',
+                            onPressed: () =>
+                                _copyToClipboard(staff.email!, 'Email'),
+                          ),
                         ),
+                      ],
                       const Divider(height: 1),
                       ListTile(
                         leading: Icon(
@@ -176,6 +330,7 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                         subtitle: Text(
                           staff.isActive ? 'Активен' : 'Заблокирован',
                           style: TextStyle(
+                            fontWeight: FontWeight.w600,
                             color: staff.isActive ? Colors.green : Colors.red,
                           ),
                         ),
@@ -189,9 +344,10 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                               )
                             : Switch(
                                 value: staff.isActive,
-                                activeColor: Colors.green,
-                                onChanged: (val) =>
-                                    _toggleUserStatus(staff.isActive),
+                                activeThumbColor: Colors.white,
+                                activeTrackColor: Colors.green,
+                                onChanged: (_) =>
+                                    _confirmAndToggleStatus(staff.isActive),
                               ),
                       ),
                     ],
@@ -202,11 +358,30 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: () => context.push('/chat/new/${staff.id}'),
-                    icon: const Icon(LucideIcons.message_circle),
-                    label: const Text('Написать сообщение'),
+                    onPressed: _isStartingChat
+                        ? null
+                        : () => _startChat(staff.id),
+                    icon: _isStartingChat
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(LucideIcons.message_circle),
+                    label: Text(
+                      _isStartingChat
+                          ? 'Открытие чата...'
+                          : 'Написать сообщение',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
+                      backgroundColor: const Color(0xFF3B82F6),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
