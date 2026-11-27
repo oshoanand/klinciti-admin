@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -23,9 +24,10 @@ import '../../features/workers/presentation/workers_dashboard_screen.dart';
 import '../../features/workers/presentation/workers_list_screen.dart';
 import '../../features/workers/presentation/worker_detail_screen.dart';
 
-// --- Chat Feature ---
+// --- Chat & Broadcast ---
 import '../../features/chat/presentation/screens/chat_inbox_screen.dart';
 import '../../features/chat/presentation/screens/chat_detail_screen.dart';
+import '../../features/chat/presentation/screens/admin_broadcast_screen.dart';
 
 // --- Support, Staff & Profile ---
 import '../../features/support/presentation/support_screen.dart';
@@ -38,12 +40,48 @@ import '../../features/staff/presentation/staff_detail_screen.dart';
 import '../../features/notifications/presentation/notifications_screen.dart';
 import '../../features/categories/presentation/categories_view.dart';
 
+// --- Finance & Cash Control ---
 import '../../features/finance/presentation/finance_screen.dart';
+import '../../features/cash_control/presentation/admin_cash_monitor_screen.dart';
+import '../../features/cash_control/presentation/admin_cash_settings_screen.dart';
 
 // ==========================================
 // 1. GLOBAL NAVIGATOR KEY
 // ==========================================
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
+
+const _adminOnlyPrefixes = <String>[
+  AppRoutes.cashSettings,
+  AppRoutes.finance,
+  AppRoutes.staffList,
+  AppRoutes.staffCreate,
+  AppRoutes.staffDetail,
+  '/admin/broadcast',
+];
+
+ChatDetailScreen _buildChatDetailScreen(GoRouterState state) {
+  final sessionId = state.pathParameters['sessionId'] ?? '';
+  final partnerId =
+      state.pathParameters['partnerId'] ??
+      state.uri.queryParameters['partnerId'] ??
+      '';
+
+  String? partnerName = state.uri.queryParameters['partnerName'];
+  String? partnerAvatar = state.uri.queryParameters['partnerAvatar'];
+
+  if (state.extra is Map) {
+    final extra = Map<String, dynamic>.from(state.extra as Map);
+    partnerName ??= extra['partnerName']?.toString();
+    partnerAvatar ??= extra['partnerAvatar']?.toString();
+  }
+
+  return ChatDetailScreen(
+    sessionId: sessionId,
+    partnerId: partnerId,
+    partnerName: partnerName,
+    partnerAvatar: partnerAvatar,
+  );
+}
 
 final routerProvider = Provider<GoRouter>((ref) {
   // Listen to auth changes without recreating the GoRouter instance
@@ -59,7 +97,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     refreshListenable: authNotifier,
 
     // ==========================================
-    // 2. GLOBAL REDIRECT LOGIC (With Deep-Link Preservation)
+    // 2. GLOBAL REDIRECT LOGIC (Auth + RBAC + Deep-Link Preservation)
     // ==========================================
     redirect: (context, state) {
       final bool isAuth = ref.read(isAuthenticatedProvider);
@@ -70,7 +108,9 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       // Not logged in -> redirect to login, preserving intended deep link
       if (!isAuth && !isAuthScreen) {
-        if (location != '/' && location != AppRoutes.home) {
+        if (location != '/' &&
+            location != AppRoutes.home &&
+            location != AppRoutes.profileDummy) {
           final encodedFrom = Uri.encodeComponent(fullUri);
           return '${AppRoutes.login}?from=$encodedFrom';
         }
@@ -82,15 +122,30 @@ final routerProvider = Provider<GoRouter>((ref) {
         final from = state.uri.queryParameters['from'];
         if (from != null &&
             from.startsWith('/') &&
-            !from.startsWith(AppRoutes.login)) {
+            !from.startsWith('//') &&
+            !from.startsWith(AppRoutes.login) &&
+            !from.startsWith(AppRoutes.profileDummy)) {
           return from;
         }
         return AppRoutes.home;
       }
 
-      // Root & legacy dashboard aliases
-      if (location == '/' || location == AppRoutes.jobDashboard) {
+      // Root, dummy drawer branch & legacy dashboard aliases
+      if (location == '/' ||
+          location == AppRoutes.jobDashboard ||
+          location == AppRoutes.profileDummy) {
         return isAuth ? AppRoutes.home : AppRoutes.login;
+      }
+
+      // Guard ADMINISTRATOR-only routes from SUPPORT accounts
+      if (isAuth) {
+        final role = (ref.read(currentUserProvider)?['role'] ?? '')
+            .toString()
+            .toUpperCase();
+        if (role == 'SUPPORT' &&
+            _adminOnlyPrefixes.any((prefix) => location.startsWith(prefix))) {
+          return AppRoutes.home;
+        }
       }
 
       return null;
@@ -128,7 +183,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const SupportScreen(),
       ),
 
-      // --- Finance Dashboard (Swap in FinanceScreen once created) ---
+      // --- Finance & Cash Control ---
       GoRoute(
         path: AppRoutes.finance,
         parentNavigatorKey: rootNavigatorKey,
@@ -137,6 +192,21 @@ final routerProvider = Provider<GoRouter>((ref) {
               int.tryParse(state.uri.queryParameters['tab'] ?? '0') ?? 0;
           return FinanceScreen(initialTab: tab);
         },
+      ),
+      GoRoute(
+        path: AppRoutes.cashMonitor,
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) => const AdminCashMonitorScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.cashSettings,
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) => const AdminCashSettingsScreen(),
+      ),
+      GoRoute(
+        path: '/admin/broadcast',
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) => const AdminBroadcastScreen(),
       ),
 
       // --- Staff Management ---
@@ -177,16 +247,6 @@ final routerProvider = Provider<GoRouter>((ref) {
             },
           ),
         ],
-      ),
-
-      GoRoute(
-        path: AppRoutes.finance,
-        parentNavigatorKey: rootNavigatorKey,
-        builder: (context, state) {
-          final tab =
-              int.tryParse(state.uri.queryParameters['tab'] ?? '0') ?? 0;
-          return FinanceScreen(initialTab: tab);
-        },
       ),
 
       // --- Job Detail (Supports BOTH `/job/:id` AND `/jobs/detail/:id`) ---
@@ -250,23 +310,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '${AppRoutes.chatDetail}/:sessionId',
         parentNavigatorKey: rootNavigatorKey,
-        builder: (context, state) {
-          final sessionId = state.pathParameters['sessionId'] ?? '';
-          final partnerId = state.uri.queryParameters['partnerId'] ?? '';
-          return ChatDetailScreen(sessionId: sessionId, partnerId: partnerId);
-        },
+        builder: (context, state) => _buildChatDetailScreen(state),
         routes: [
           GoRoute(
             path: ':partnerId',
             parentNavigatorKey: rootNavigatorKey,
-            builder: (context, state) {
-              final sessionId = state.pathParameters['sessionId'] ?? '';
-              final partnerId = state.pathParameters['partnerId'] ?? '';
-              return ChatDetailScreen(
-                sessionId: sessionId,
-                partnerId: partnerId,
-              );
-            },
+            builder: (context, state) => _buildChatDetailScreen(state),
           ),
         ],
       ),
@@ -340,7 +389,7 @@ final routerProvider = Provider<GoRouter>((ref) {
 });
 
 // ==========================================
-// 4. FALLBACK & PLACEHOLDER SCREENS
+// 4. FALLBACK SCREEN
 // ==========================================
 class _RouteNotFoundScreen extends StatelessWidget {
   final String uri;
@@ -378,7 +427,7 @@ class _RouteNotFoundScreen extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                uri,
+                kDebugMode ? uri : 'Запрошенная страница недоступна.',
                 textAlign: TextAlign.center,
                 style: const TextStyle(color: Color(0xFF64748B), fontSize: 13),
               ),

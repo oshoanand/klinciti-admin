@@ -483,7 +483,7 @@ class _JobDetailScreenState extends ConsumerState<JobDetailScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(
-                  LucideIcons.circle_alert,
+                  LucideIcons.circle_exclamation_point,
                   color: Colors.red,
                   size: 40,
                 ),
@@ -1138,7 +1138,7 @@ class _JobDetailScreenState extends ConsumerState<JobDetailScreen> {
           ),
           child: const Row(
             children: [
-              Icon(LucideIcons.circle_alert, color: Colors.orange),
+              Icon(LucideIcons.circle_exclamation_point, color: Colors.orange),
               SizedBox(width: 12),
               Text(
                 'Исполнитель еще не назначен',
@@ -1783,7 +1783,7 @@ class _AssignWorkerBottomSheetState
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         const Icon(
-                          LucideIcons.circle_alert,
+                          LucideIcons.circle_exclamation_point,
                           color: Colors.red,
                           size: 36,
                         ),

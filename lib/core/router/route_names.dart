@@ -45,6 +45,9 @@ class AppRoutes {
   // Category Routes
   static const String categories = '/categories';
 
+  static const String cashMonitor = '/admin/cash-monitor';
+  static const String cashSettings = '/admin/cash-settings';
+
   // ==========================================
   // TYPED PATH BUILDERS (Safe Deep-Link Helpers)
   // ==========================================

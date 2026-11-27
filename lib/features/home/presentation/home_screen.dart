@@ -299,7 +299,7 @@ class HomeScreen extends ConsumerWidget {
                                   subtitle: 'Арбитраж',
                                   status: 'DISPUTED',
                                   count: stats['DISPUTED'] ?? 0,
-                                  icon: LucideIcons.triangle_alert,
+                                  icon: LucideIcons.triangle_exclamation_point,
                                   color: const Color(0xFFEAB308),
                                   highlightBorder: (stats['DISPUTED'] ?? 0) > 0,
                                   onTap: () => _openJobsByStatus(
@@ -480,7 +480,7 @@ class HomeScreen extends ConsumerWidget {
                 shape: BoxShape.circle,
               ),
               child: const Icon(
-                LucideIcons.triangle_alert,
+                LucideIcons.triangle_exclamation_point,
                 color: Colors.red,
                 size: 28,
               ),

@@ -1,18 +1,24 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:overlay_support/overlay_support.dart';
-import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
-import 'package:flutter/material.dart';
 
 import '../../../core/socket/socket_service.dart';
-import '../data/models/chat_session_model.dart';
-import '../data/chat_repository.dart';
 import '../../auth/providers/auth_provider.dart';
-import 'active_chat_provider.dart'; // ✅ Add import
+import '../data/chat_repository.dart';
+import '../data/models/chat_session_model.dart';
+import 'active_chat_provider.dart';
 
 final chatSessionsProvider =
-    AsyncNotifierProvider<ChatSessionsNotifier, List<ChatSessionModel>>(() {
-      return ChatSessionsNotifier();
-    });
+    AsyncNotifierProvider<ChatSessionsNotifier, List<ChatSessionModel>>(
+      ChatSessionsNotifier.new,
+    );
+
+/// Standalone total unread count for optimized bottom-nav badge rebuilds.
+final totalUnreadChatCountProvider = Provider<int>((ref) {
+  final sessions = ref.watch(chatSessionsProvider).valueOrNull ?? const [];
+  return sessions.fold<int>(0, (sum, s) => sum + s.unreadCount);
+});
 
 class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
   late SocketService _socket;
@@ -21,24 +27,17 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
   Future<List<ChatSessionModel>> build() async {
     _socket = ref.watch(socketServiceProvider);
 
-    // Setup real-time listeners for inbox updates
+    // Real-time inbox listeners
     _socket.listen('receive_message', _onMessageReceived);
     _socket.listen('messages_read_by_recipient', _onMessagesRead);
-
-    // ✅ 1. Listen for when YOUR read receipts are confirmed by the server
     _socket.listen('read_status_synced', _onReadStatusSynced);
-
-    // Real-time Presence
     _socket.listen('user_status_changed', _onUserStatusChanged);
-
-    // Real-time Typing Indicators
     _socket.listen('user_typing', _onUserTyping);
     _socket.listen('user_stopped_typing', _onUserStoppedTyping);
 
     ref.onDispose(() {
       _socket.stopListening('receive_message', _onMessageReceived);
       _socket.stopListening('messages_read_by_recipient', _onMessagesRead);
-      // ✅ 2. Clean up the new listener
       _socket.stopListening('read_status_synced', _onReadStatusSynced);
       _socket.stopListening('user_status_changed', _onUserStatusChanged);
       _socket.stopListening('user_typing', _onUserTyping);
@@ -48,44 +47,53 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
     return _fetchInitialSessions();
   }
 
-  Future<List<ChatSessionModel>> _fetchInitialSessions() async {
-    try {
-      return await ref.read(chatRepositoryProvider).fetchSessions();
-    } catch (e, st) {
-      throw AsyncValue.error(e, st);
-    }
+  Future<List<ChatSessionModel>> _fetchInitialSessions() {
+    return ref.read(chatRepositoryProvider).fetchSessions();
   }
 
   Future<void> refresh() async {
-    state = const AsyncValue.loading();
-    state = await AsyncValue.guard(() => _fetchInitialSessions());
+    state = await AsyncValue.guard(_fetchInitialSessions);
+  }
+
+  /// Refreshes the inbox in the background without flashing a loading spinner.
+  Future<void> _silentRefresh() async {
+    try {
+      final fresh = await _fetchInitialSessions();
+      state = AsyncValue.data(fresh);
+    } catch (_) {
+      // Keep existing inbox list on transient network errors
+    }
   }
 
   // ==========================================
   // INCOMING MESSAGES
   // ==========================================
-
   void _onMessageReceived(dynamic payload) {
-    if (!state.hasValue) return;
+    if (!state.hasValue || payload is! Map) return;
 
     try {
       final data = Map<String, dynamic>.from(payload);
       final sessionId =
           data['chat_session_id']?.toString() ??
           data['chatSessionId']?.toString();
-      final text = data['text']?.toString();
+      if (sessionId == null || sessionId.isEmpty) return;
+
+      final rawText = data['text']?.toString().trim();
+      final previewText = (rawText != null && rawText.isNotEmpty)
+          ? rawText
+          : '📷 Фото';
       final senderId =
           data['sender_id']?.toString() ?? data['senderId']?.toString();
 
       final currentUser = ref.read(currentUserProvider);
       final currentUserId = currentUser?['id']?.toString();
-      final isMe = senderId == currentUserId;
+      final isMe = senderId != null && senderId == currentUserId;
 
-      // ✅ Check which room is currently open on the screen
       final currentlyActiveSessionId = ref.read(activeChatSessionProvider);
+      final isViewingThisChat = currentlyActiveSessionId == sessionId;
 
-      // ✅ Only play sound and show banner if we are NOT in this specific chat room
-      if (!isMe && currentlyActiveSessionId != sessionId) {
+      // Play sound and show overlay banner only when not actively viewing this chat
+      if (!isMe && !isViewingThisChat) {
         FlutterRingtonePlayer().playNotification();
 
         showOverlayNotification((context) {
@@ -99,7 +107,7 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.15),
+                      color: Colors.black.withValues(alpha: 0.15),
                       blurRadius: 16,
                       offset: const Offset(0, 8),
                     ),
@@ -111,7 +119,8 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
                     vertical: 4,
                   ),
                   leading: CircleAvatar(
-                    backgroundColor: const Color(0xFF3B82F6).withOpacity(0.1),
+                    backgroundColor: const Color(0xFF3B82F6)
+                        .withValues(alpha: 0.1),
                     child: const Icon(
                       Icons.message_rounded,
                       color: Color(0xFF3B82F6),
@@ -122,7 +131,7 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
                   ),
                   subtitle: Text(
-                    text ?? '📷 Фото',
+                    previewText,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: Colors.grey.shade600),
@@ -143,9 +152,11 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
       if (index != -1) {
         final session = currentSessions[index];
         final updatedSession = session.copyWith(
-          lastMessage: text ?? '📷 Фото',
-          updatedAt: DateTime.now().toIso8601String(),
-          unreadCount: isMe ? session.unreadCount : session.unreadCount + 1,
+          lastMessage: previewText,
+          updatedAt: DateTime.now().toUtc().toIso8601String(),
+          unreadCount: (isMe || isViewingThisChat)
+              ? session.unreadCount
+              : session.unreadCount + 1,
           isTyping: false,
         );
 
@@ -154,10 +165,11 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
         newList.insert(0, updatedSession);
         state = AsyncValue.data(newList);
       } else {
-        refresh();
+        // Brand-new session from someone not yet in the inbox
+        _silentRefresh();
       }
-    } catch (e) {
-      // Graceful degradation
+    } catch (_) {
+      // Ignore malformed payloads gracefully
     }
   }
 
@@ -165,109 +177,97 @@ class ChatSessionsNotifier extends AsyncNotifier<List<ChatSessionModel>> {
   // READ RECEIPTS
   // ==========================================
   void _onMessagesRead(dynamic payload) {
-    if (!state.hasValue) return;
-    try {
-      // Logic for when the PARTNER reads your messages
-    } catch (_) {}
+    // Handled inside ChatMessagesNotifier for message-level double-check marks
   }
 
-  // ✅ 3. NEW HANDLER: Instantly clears the unread count when you open the chat
   void _onReadStatusSynced(dynamic payload) {
-    if (!state.hasValue) return;
+    if (!state.hasValue || payload is! Map) return;
 
     try {
       final data = Map<String, dynamic>.from(payload);
-      final partnerId = data['partnerId'] as String;
+      final sessionId =
+          data['chatSessionId']?.toString() ??
+          data['chat_session_id']?.toString();
+      final partnerId = data['partnerId']?.toString();
 
       final currentSessions = state.value!;
-      final index = currentSessions.indexWhere((s) => s.partnerId == partnerId);
+      final index = currentSessions.indexWhere(
+        (s) =>
+            (sessionId != null && s.id == sessionId) ||
+            (partnerId != null && s.partnerId == partnerId),
+      );
 
       if (index != -1) {
         final session = currentSessions[index];
-
-        // If it's already 0, skip rebuilding the UI
         if (session.unreadCount == 0) return;
 
-        // Zero out the unread count for this specific session
-        final updatedSession = session.copyWith(unreadCount: 0);
-
         final newList = [...currentSessions];
-        newList[index] = updatedSession;
+        newList[index] = session.copyWith(unreadCount: 0);
         state = AsyncValue.data(newList);
       }
-    } catch (e) {
-      // Ignore parsing errors
-    }
+    } catch (_) {}
   }
 
   // ==========================================
-  // REAL-TIME PRESENCE (Online/Offline)
+  // REAL-TIME PRESENCE (ONLINE / OFFLINE)
   // ==========================================
   void _onUserStatusChanged(dynamic payload) {
-    if (!state.hasValue) return;
+    if (!state.hasValue || payload is! Map) return;
 
     try {
       final data = Map<String, dynamic>.from(payload);
-      final userId = data['userId'] as String;
-      final isOnline = data['isOnline'] as bool;
-      final lastSeen = data['lastSeen'] as String?;
+      final userId = data['userId']?.toString();
+      if (userId == null) return;
+
+      final isOnline = data['isOnline'] == true;
+      final lastSeen = data['lastSeen']?.toString();
 
       final currentSessions = state.value!;
       final index = currentSessions.indexWhere((s) => s.partnerId == userId);
 
       if (index != -1) {
         final session = currentSessions[index];
-
-        if (session.isOnline == isOnline) return;
-
-        final updatedSession = session.copyWith(
-          isOnline: isOnline,
-          lastSeen: lastSeen,
-        );
+        if (session.isOnline == isOnline && session.lastSeen == lastSeen) {
+          return;
+        }
 
         final newList = [...currentSessions];
-        newList[index] = updatedSession;
+        newList[index] = session.copyWith(
+          isOnline: isOnline,
+          lastSeen: isOnline ? null : lastSeen,
+        );
         state = AsyncValue.data(newList);
       }
-    } catch (e) {
-      // Ignore parsing errors
-    }
+    } catch (_) {}
   }
 
   // ==========================================
   // TYPING INDICATORS
   // ==========================================
-  void _onUserTyping(dynamic payload) {
-    _updateTypingState(payload, true);
-  }
+  void _onUserTyping(dynamic payload) => _updateTypingState(payload, true);
 
-  void _onUserStoppedTyping(dynamic payload) {
-    _updateTypingState(payload, false);
-  }
+  void _onUserStoppedTyping(dynamic payload) =>
+      _updateTypingState(payload, false);
 
   void _updateTypingState(dynamic payload, bool isTyping) {
-    if (!state.hasValue) return;
+    if (!state.hasValue || payload is! Map) return;
 
     try {
       final data = Map<String, dynamic>.from(payload);
-      final userId = data['userId'] as String;
+      final userId = data['userId']?.toString();
+      if (userId == null) return;
 
       final currentSessions = state.value!;
       final index = currentSessions.indexWhere((s) => s.partnerId == userId);
 
       if (index != -1) {
         final session = currentSessions[index];
-
         if (session.isTyping == isTyping) return;
 
-        final updatedSession = session.copyWith(isTyping: isTyping);
-
         final newList = [...currentSessions];
-        newList[index] = updatedSession;
+        newList[index] = session.copyWith(isTyping: isTyping);
         state = AsyncValue.data(newList);
       }
-    } catch (e) {
-      // Ignore parsing errors
-    }
+    } catch (_) {}
   }
 }

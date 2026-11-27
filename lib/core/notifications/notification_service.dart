@@ -10,6 +10,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../features/chat/providers/active_chat_provider.dart';
 import '../network/api_client.dart';
 import '../router/app_router.dart';
 import '../router/route_names.dart';
@@ -22,6 +23,7 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 final notificationServiceProvider = Provider<NotificationService>((ref) {
   final service = NotificationService(
+    ref,
     ref.watch(apiClientProvider),
     rootNavigatorKey,
     ref.watch(socketServiceProvider),
@@ -38,6 +40,7 @@ class NotificationService {
   final FlutterLocalNotificationsPlugin _localPlugin =
       FlutterLocalNotificationsPlugin();
 
+  final Ref _ref;
   final ApiClient _apiClient;
   final GlobalKey<NavigatorState> _navigatorKey;
   final SocketService _socketService;
@@ -51,7 +54,12 @@ class NotificationService {
   bool _isInitialized = false;
   bool _isLocalPluginReady = false;
 
-  NotificationService(this._apiClient, this._navigatorKey, this._socketService);
+  NotificationService(
+    this._ref,
+    this._apiClient,
+    this._navigatorKey,
+    this._socketService,
+  );
 
   void dispose() {
     _socketService.stopListening('notification', _handleSocketMessage);
@@ -140,8 +148,6 @@ class NotificationService {
     _isLocalPluginReady = true;
   }
 
-  /// Binds this device token to the Admin user; backend Redis Stream consumer
-  /// automatically subscribes it to `admin_alerts` and `user_<mobile>`.
   Future<void> registerTokenAfterLogin() async {
     try {
       final fcmToken = await _fcm.getToken();
@@ -153,8 +159,6 @@ class NotificationService {
     }
   }
 
-  /// Call BEFORE deleting `jwt_token` on logout so the backend removes the token
-  /// and unsubscribes it from `admin_alerts` and `user_<mobile>`.
   Future<void> unregisterTokenOnLogout() async {
     try {
       final fcmToken = await _fcm.getToken();
@@ -176,7 +180,7 @@ class NotificationService {
     bool forceRegister = false,
   }) async {
     try {
-      final token = await _apiClient.storage.read(key: 'jwt_token');
+      final token = await _apiClient.storage.read(key: StorageKeys.jwtToken);
       if (!forceRegister && (token == null || token.isEmpty)) return;
 
       final String deviceType = (!kIsWeb && Platform.isIOS) ? 'IOS' : 'ANDROID';
@@ -190,6 +194,15 @@ class NotificationService {
     }
   }
 
+  bool _shouldSuppressChatNotification(Map<String, dynamic> data) {
+    final type = data['type']?.toString().toUpperCase() ?? '';
+    final sessionId = data['sessionId']?.toString();
+    if (type != 'CHAT_FCM' || sessionId == null || sessionId.isEmpty) {
+      return false;
+    }
+    return _ref.read(activeChatSessionProvider) == sessionId;
+  }
+
   void _processIncomingNotification({
     required String id,
     required String title,
@@ -197,6 +210,7 @@ class NotificationService {
     required Map<String, dynamic> payloadData,
   }) {
     if (!_isLocalPluginReady) return;
+    if (_shouldSuppressChatNotification(payloadData)) return;
 
     final now = DateTime.now();
     _recentNotificationIds.removeWhere(
@@ -272,7 +286,10 @@ class NotificationService {
         if (data['notificationId'] != null)
           'notificationId': data['notificationId'],
         if (data['type'] != null) 'type': data['type'],
+        if (data['subType'] != null) 'subType': data['subType'],
+        if (data['url'] != null) 'url': data['url'],
         if (data['sessionId'] != null) 'sessionId': data['sessionId'],
+        if (data['partnerId'] != null) 'partnerId': data['partnerId'],
         if (data['jobId'] != null) 'jobId': data['jobId'],
         if (data['workerId'] != null) 'workerId': data['workerId'],
         if (data['paymentId'] != null) 'paymentId': data['paymentId'],
@@ -325,20 +342,45 @@ class NotificationService {
     if (context == null) return;
 
     final type = data['type']?.toString().toUpperCase() ?? '';
+    final subType = data['subType']?.toString().toUpperCase() ?? '';
+    final url = data['url']?.toString().trim() ?? '';
     final sessionId = data['sessionId']?.toString();
+    final partnerId = data['partnerId']?.toString();
     final jobId = data['jobId']?.toString();
     final workerId = data['workerId']?.toString();
 
-    if (sessionId != null && sessionId.isNotEmpty) {
-      context.push('${AppRoutes.chatDetail}/$sessionId');
+    // 1. Cash Monitor alerts (debt caps, overdue workers, cash disputes)
+    if (url.startsWith(AppRoutes.cashMonitor) ||
+        subType.startsWith('ADMIN_WORKER_') ||
+        subType == 'ADMIN_CASH_DISPUTE') {
+      context.push(AppRoutes.cashMonitor);
       return;
     }
+
+    // 2. Chat messages (preserve partnerId so typing/presence/read-receipts work)
+    if (sessionId != null && sessionId.isNotEmpty) {
+      final path = (partnerId != null && partnerId.isNotEmpty)
+          ? '${AppRoutes.chatDetail}/$sessionId/$partnerId'
+          : '${AppRoutes.chatDetail}/$sessionId';
+      context.push(path);
+      return;
+    }
+
+    // 3. Finance / T-Bank payouts & refunds
     if (type.contains('PAYOUT') ||
         type.contains('PAYMENT') ||
         type.contains('REFUND')) {
-      context.go(AppRoutes.finance);
+      context.push(AppRoutes.finance);
       return;
     }
+
+    // 4. Direct internal URL fallback from broadcasts or system alerts
+    if (url.startsWith('/') && !url.startsWith('//') && url != '/') {
+      context.push(url);
+      return;
+    }
+
+    // 5. Entity fallbacks
     if (workerId != null && workerId.isNotEmpty) {
       context.push('${AppRoutes.workerDetail}/$workerId');
       return;

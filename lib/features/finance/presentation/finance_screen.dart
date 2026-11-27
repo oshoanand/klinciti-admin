@@ -856,7 +856,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen>
                 child: const Row(
                   children: [
                     Icon(
-                      LucideIcons.shield_alert,
+                      LucideIcons.shield_exclamation_point,
                       color: Color(0xFFDC2626),
                       size: 18,
                     ),
@@ -1167,7 +1167,7 @@ class _FinanceScreenState extends ConsumerState<FinanceScreen>
                 Icon(
                   settings.autoPayoutsEnabled
                       ? LucideIcons.circle_check
-                      : LucideIcons.shield_alert,
+                      : LucideIcons.circle_exclamation_point,
                   color: settings.autoPayoutsEnabled
                       ? const Color(0xFF10B981)
                       : const Color(0xFFDC2626),
@@ -1477,7 +1477,7 @@ class _InlineErrorBanner extends StatelessWidget {
       child: Row(
         children: [
           const Icon(
-            LucideIcons.circle_alert,
+            LucideIcons.circle_exclamation_point,
             color: Color(0xFFDC2626),
             size: 16,
           ),

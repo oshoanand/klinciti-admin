@@ -66,7 +66,7 @@ class JobDashboardScreen extends ConsumerWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(
-                  LucideIcons.circle_alert,
+                  LucideIcons.circle_exclamation_point,
                   color: Colors.red,
                   size: 40,
                 ),

@@ -312,7 +312,7 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(
-                  LucideIcons.circle_alert,
+                  LucideIcons.circle_exclamation_point,
                   color: Colors.red,
                   size: 42,
                 ),
@@ -569,7 +569,11 @@ class _WorkerDetailScreenState extends ConsumerState<WorkerDetailScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(LucideIcons.circle_alert, color: Colors.red, size: 20),
+          const Icon(
+            LucideIcons.circle_exclamation_point,
+            color: Colors.red,
+            size: 20,
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: Column(

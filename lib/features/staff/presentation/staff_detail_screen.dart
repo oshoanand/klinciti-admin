@@ -323,7 +323,7 @@ class _StaffDetailScreenState extends ConsumerState<StaffDetailScreen> {
                         leading: Icon(
                           staff.isActive
                               ? LucideIcons.shield_check
-                              : LucideIcons.shield_alert,
+                              : LucideIcons.shield_exclamation_point,
                           color: staff.isActive ? Colors.green : Colors.red,
                         ),
                         title: const Text('Статус аккаунта'),

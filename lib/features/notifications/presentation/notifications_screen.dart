@@ -1,24 +1,36 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../providers/notification_provider.dart';
+import '../../../core/network/api_exceptions.dart';
+import '../../../core/router/route_names.dart';
 import '../../../core/utils/date_formatter.dart';
 import '../../../shared/widgets/global_error_widget.dart';
-import '../../../core/network/api_exceptions.dart';
+import '../providers/notification_provider.dart';
 
-// Helper for UI styling based on type
 class NotifStyle {
   final IconData icon;
   final Color bgColor;
   final Color iconColor;
 
-  NotifStyle(this.icon, this.bgColor, this.iconColor);
+  const NotifStyle(this.icon, this.bgColor, this.iconColor);
 }
 
-NotifStyle _getStyle(String type) {
-  switch (type.toUpperCase()) {
+NotifStyle _getStyle(String type, String subType) {
+  final upperType = type.toUpperCase();
+  final upperSub = subType.toUpperCase();
+
+  if (upperSub.startsWith('ADMIN_WORKER_') ||
+      upperSub == 'ADMIN_CASH_DISPUTE') {
+    return NotifStyle(
+      LucideIcons.banknote,
+      Colors.orange.shade50,
+      Colors.orange.shade700,
+    );
+  }
+
+  switch (upperType) {
     case 'JOB':
       return NotifStyle(
         LucideIcons.package,
@@ -35,7 +47,7 @@ NotifStyle _getStyle(String type) {
     case 'ALERT':
     case 'SYSTEM_ALERT':
       return NotifStyle(
-        LucideIcons.triangle_alert,
+        LucideIcons.triangle_exclamation_point,
         Colors.red.shade50,
         Colors.red.shade600,
       );
@@ -51,9 +63,71 @@ NotifStyle _getStyle(String type) {
 class NotificationsScreen extends ConsumerWidget {
   const NotificationsScreen({super.key});
 
+  void _handleNotificationTap(BuildContext context, NotificationModel notif) {
+    final data = notif.data ?? const <String, dynamic>{};
+    final type = notif.type.toUpperCase();
+    final subType = (data['subType'] ?? '').toString().toUpperCase();
+    final url = (notif.link ?? data['url'] ?? '').toString().trim();
+    final sessionId = data['sessionId']?.toString();
+    final partnerId = data['partnerId']?.toString();
+    final workerId = data['workerId']?.toString();
+    final jobId = data['jobId']?.toString();
+
+    // 1. Cash Monitor alerts
+    if (url.startsWith(AppRoutes.cashMonitor) ||
+        subType.startsWith('ADMIN_WORKER_') ||
+        subType == 'ADMIN_CASH_DISPUTE') {
+      context.push(AppRoutes.cashMonitor);
+      return;
+    }
+
+    // 2. Chat messages
+    if (sessionId != null && sessionId.isNotEmpty) {
+      final path = (partnerId != null && partnerId.isNotEmpty)
+          ? '${AppRoutes.chatDetail}/$sessionId/$partnerId'
+          : '${AppRoutes.chatDetail}/$sessionId';
+      context.push(path);
+      return;
+    }
+
+    // 3. Finance / Payments
+    if (type.contains('PAYOUT') ||
+        type.contains('PAYMENT') ||
+        type.contains('REFUND')) {
+      context.push(AppRoutes.finance);
+      return;
+    }
+
+    // 4. Entity deep links
+    if (workerId != null && workerId.isNotEmpty) {
+      context.push('${AppRoutes.workerDetail}/$workerId');
+      return;
+    }
+    if (jobId != null && jobId.isNotEmpty) {
+      context.push('${AppRoutes.jobDetail}/$jobId');
+      return;
+    }
+
+    // 5. Safe internal URL (never push '/' or shell branch roots)
+    if (url.startsWith('/') &&
+        !url.startsWith('//') &&
+        url != '/' &&
+        url != AppRoutes.home &&
+        url != AppRoutes.customers &&
+        url != AppRoutes.workers &&
+        url != AppRoutes.chatList &&
+        url != AppRoutes.notifications) {
+      context.push(url);
+      return;
+    }
+
+    if (type == 'JOB') {
+      context.go(AppRoutes.home);
+    }
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // Watch the AsyncValue from the plural provider
     final notificationsAsync = ref.watch(notificationsProvider);
     final unreadCount = ref.watch(unreadCountProvider);
     final notifier = ref.read(notificationsProvider.notifier);
@@ -62,6 +136,7 @@ class NotificationsScreen extends ConsumerWidget {
       backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
         backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
         elevation: 0,
         foregroundColor: Colors.black,
         title: const Text(
@@ -90,49 +165,56 @@ class NotificationsScreen extends ConsumerWidget {
       body: notificationsAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
-          final apiError = ApiException.fromDioException(error);
+          final message = ApiException.fromDioException(error).message;
           return GlobalErrorWidget(
-            message: apiError.message,
+            message: message,
             onRetry: () => notifier.fetchInitial(),
           );
         },
         data: (notifications) {
           if (notifications.isEmpty) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      width: 96,
-                      height: 96,
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade100,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        LucideIcons.bell,
-                        size: 40,
-                        color: Colors.grey.shade400,
-                      ),
+            return RefreshIndicator(
+              onRefresh: () => notifier.fetchInitial(),
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: [
+                  const SizedBox(height: 120),
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 96,
+                          height: 96,
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            LucideIcons.bell,
+                            size: 40,
+                            color: Colors.grey.shade400,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        const Text(
+                          'У вас нет уведомлений',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          'Здесь будут появляться сообщения о статусе заказов, ответы поддержки и системные оповещения.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey, fontSize: 15),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 24),
-                    const Text(
-                      'У вас нет уведомлений',
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Здесь будут появляться сообщения о статусе заказов, ответы поддержки и системные оповещения.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey, fontSize: 15),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             );
           }
@@ -140,142 +222,106 @@ class NotificationsScreen extends ConsumerWidget {
           return RefreshIndicator(
             onRefresh: () => notifier.fetchInitial(),
             child: ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.all(16),
               itemCount: notifications.length,
-              separatorBuilder: (context, index) =>
-                  const Divider(height: 1, color: Color(0xFFE2E8F0)),
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
                 final notif = notifications[index];
+                final subType = notif.data?['subType']?.toString() ?? '';
+                final style = _getStyle(notif.type, subType);
+                final createdAt =
+                    DateTime.tryParse(notif.createdAt)?.toLocal() ??
+                    DateTime.now();
 
-                // Extract type and link from the dynamic data map
-                final String notifType =
-                    notif.data?['type']?.toString() ?? 'INFO';
-                final String? notifLink = notif.data?['url']?.toString();
-
-                final style = _getStyle(notifType);
-
-                return InkWell(
-                  onTap: () {
-                    // Mark as read immediately for snappy UI
-                    if (!notif.isRead) {
-                      notifier.markAsRead(notif.id);
-                    }
-
-                    // Route based on dynamic data
-                    if (notifLink != null && notifLink.isNotEmpty) {
-                      context.push(notifLink);
-                    } else if (notifType == 'CHAT' &&
-                        notif.data?['sessionId'] != null) {
-                      context.push('/chat-detail/${notif.data!['sessionId']}');
-                    } else if (notifType == 'JOB') {
-                      context.push('/dashboard');
-                    }
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: !notif.isRead
-                          ? const Color(0xFF0F172A).withOpacity(0.03)
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: IntrinsicHeight(
+                return Material(
+                  color: !notif.isRead
+                      ? const Color(0xFF0F172A).withValues(alpha: 0.04)
+                      : Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () {
+                      if (!notif.isRead) {
+                        notifier.markAsRead(notif.id);
+                      }
+                      _handleNotificationTap(context, notif);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: !notif.isRead
+                              ? const Color(0xFF0F172A).withValues(alpha: 0.18)
+                              : const Color(0xFFE2E8F0),
+                        ),
+                      ),
                       child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Left Indicator Bar
                           Container(
-                            width: 4,
+                            width: 48,
+                            height: 48,
                             decoration: BoxDecoration(
-                              color: !notif.isRead
-                                  ? const Color(0xFF0F172A)
-                                  : Colors.transparent,
-                              borderRadius: const BorderRadius.only(
-                                topLeft: Radius.circular(16),
-                                bottomLeft: Radius.circular(16),
-                              ),
+                              color: style.bgColor,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              style.icon,
+                              color: style.iconColor,
+                              size: 22,
                             ),
                           ),
+                          const SizedBox(width: 14),
                           Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.all(16),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  // Icon Circle
-                                  Container(
-                                    width: 48,
-                                    height: 48,
-                                    decoration: BoxDecoration(
-                                      color: style.bgColor,
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(
-                                      style.icon,
-                                      color: style.iconColor,
-                                      size: 22,
-                                    ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  notif.title,
+                                  style: TextStyle(
+                                    fontSize: 15.5,
+                                    fontWeight: !notif.isRead
+                                        ? FontWeight.bold
+                                        : FontWeight.w600,
+                                    color: !notif.isRead
+                                        ? const Color(0xFF0F172A)
+                                        : Colors.grey.shade700,
                                   ),
-                                  const SizedBox(width: 16),
-                                  // Content
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          notif.title,
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: !notif.isRead
-                                                ? FontWeight.bold
-                                                : FontWeight.w600,
-                                            color: !notif.isRead
-                                                ? Colors.black
-                                                : Colors.grey.shade700,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          notif.message,
-                                          style: TextStyle(
-                                            fontSize: 14,
-                                            color: !notif.isRead
-                                                ? Colors.black87
-                                                : Colors.grey.shade500,
-                                            height: 1.4,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        Text(
-                                          DateFormatter.formatTimeAgo(
-                                            DateTime.tryParse(
-                                                  notif.createdAt,
-                                                ) ??
-                                                DateTime.now(),
-                                          ),
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.grey.shade400,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  notif.message,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: !notif.isRead
+                                        ? Colors.black87
+                                        : Colors.grey.shade600,
+                                    height: 1.4,
                                   ),
-                                  // Right Dot indicator
-                                  if (!notif.isRead)
-                                    const Padding(
-                                      padding: EdgeInsets.only(top: 8, left: 8),
-                                      child: Icon(
-                                        Icons.circle,
-                                        size: 10,
-                                        color: Color(0xFF0F172A),
-                                      ),
-                                    ),
-                                ],
-                              ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  DateFormatter.formatTimeAgo(createdAt),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.grey.shade500,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
+                          if (!notif.isRead)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 6, left: 8),
+                              child: Icon(
+                                Icons.circle,
+                                size: 10,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
                         ],
                       ),
                     ),

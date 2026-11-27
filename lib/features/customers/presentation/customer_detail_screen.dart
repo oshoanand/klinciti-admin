@@ -473,7 +473,7 @@ class _CustomerDetailScreenState extends ConsumerState<CustomerDetailScreen> {
                           leading: Icon(
                             customer.isActive
                                 ? LucideIcons.shield_check
-                                : LucideIcons.shield_alert,
+                                : LucideIcons.shield_lock,
                             color: customer.isActive
                                 ? Colors.green
                                 : Colors.red,
